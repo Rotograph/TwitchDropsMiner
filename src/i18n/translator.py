@@ -11,6 +11,7 @@ class StatusMessages(TypedDict):
     terminated: str
     watching: str
     idle_watching: str
+    idle_watching_points: str
     mining_resumed: str
     goes_online: str
     goes_offline: str

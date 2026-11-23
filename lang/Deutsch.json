@@ -5,6 +5,7 @@
         "terminated": "\nAnwendung gestoppt.\nFenster schließen, um die Anwendung zu beenden",
         "watching": "{channel} wird zugesehen",
         "idle_watching": "Idle watching {channel}",
+        "idle_watching_points": "Idle watching {channel}: {points} channel points",
         "mining_resumed": "Farmen fortgesetzt",
         "goes_online": "{channel} ist ONLINE gegangen, wechseln...",
         "goes_offline": "{channel} ist OFFLINE gegangen, wechseln...",

@@ -5,6 +5,7 @@
         "terminated": "\nAplicação Finalizada.\nFeche a janela para sair do programa.",
         "watching": "Assistindo o: {channel}",
         "idle_watching": "Idle watching {channel}",
+        "idle_watching_points": "Idle watching {channel}: {points} channel points",
         "mining_resumed": "Mineração retomada",
         "goes_online": "{channel} esta ONLINE, Mudando...",
         "goes_offline": "{channel} ficou OFFLINE, Mudando...",

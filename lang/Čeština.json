@@ -5,6 +5,7 @@
         "terminated": "\nAplikace byla ukončena.",
         "watching": "Sledování kanálu: {channel}",
         "idle_watching": "Idle watching {channel}",
+        "idle_watching_points": "Idle watching {channel}: {points} channel points",
         "mining_resumed": "Získávání dropů obnoveno",
         "goes_online": "Kanál {channel} je online, přepínám...",
         "goes_offline": "Kanál {channel} je offline, přepínám na další...",

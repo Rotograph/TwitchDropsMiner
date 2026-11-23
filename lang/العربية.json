@@ -5,6 +5,7 @@
         "terminated": "تم إنهاء التطبيق. \n أغلق النافذة للخروج من التطبيق.",
         "watching": "{channel} :يتم حالياَ مشاهدة",
         "idle_watching": "Idle watching {channel}",
+        "idle_watching_points": "Idle watching {channel}: {points} channel points",
         "mining_resumed": "تم استئناف جمع المكافآت",
         "goes_online": "...اصبح نشط ، تبديل {channel}",
         "goes_offline": "...اصبح غير نشط ، تبديل {channel}",

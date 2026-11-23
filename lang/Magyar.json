@@ -5,6 +5,7 @@
         "terminated": "\nAlkalmazás leállítva.\nZárja be az ablakot a kilépéshez.",
         "watching": "Nézés: {channel}",
         "idle_watching": "Idle watching {channel}",
+        "idle_watching_points": "Idle watching {channel}: {points} channel points",
         "mining_resumed": "Bányászat folytatva",
         "goes_online": "{channel} online lesz, váltás...",
         "goes_offline": "{channel} offline lett, váltás...",

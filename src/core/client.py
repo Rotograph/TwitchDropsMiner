@@ -602,6 +602,9 @@ class Twitch:
                     "User", "Drops", auth_state.user_id, self._message_handler_service.process_drops
                 ),
                 WebsocketTopic(
+                    "User", "CommunityPoints", auth_state.user_id, self._idle_watch.process_points
+                ),
+                WebsocketTopic(
                     "User",
                     "Notifications",
                     auth_state.user_id,

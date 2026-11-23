@@ -5,6 +5,7 @@
         "terminated": "\nToepassing gestopt.\nSLuit het venster om de toepassing af te sluiten",
         "watching": "{channel} wordt gekeken",
         "idle_watching": "Idle watching {channel}",
+        "idle_watching_points": "Idle watching {channel}: {points} channel points",
         "mining_resumed": "Drops verzamelen hervat",
         "goes_online": "{channel} is ONLINE gegaan, wijzig...",
         "goes_offline": "{channel} is OFFLINE gegaan, wijzig...",

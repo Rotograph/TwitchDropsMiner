@@ -5,6 +5,7 @@
         "terminated": "\nПриложение остановлено.\nЗакройте окно, чтобы выйти из приложения.",
         "watching": "Просмотр канала: {channel}",
         "idle_watching": "Idle watching {channel}",
+        "idle_watching_points": "Idle watching {channel}: {points} channel points",
         "mining_resumed": "Сбор наград возобновлён",
         "goes_online": "Изменение: {channel} онлайн",
         "goes_offline": "Изменение: {channel} онлайн",

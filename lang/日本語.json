@@ -5,6 +5,7 @@
         "terminated": "\nアプリケーションが終了しました。\nウィンドウを閉じてアプリケーションを終了します。",
         "watching": "{channel} を視聴中",
         "idle_watching": "Idle watching {channel}",
+        "idle_watching_points": "Idle watching {channel}: {points} channel points",
         "mining_resumed": "ドロップの獲得を再開しました",
         "goes_online": "{channel} がオンラインになりました。切り替え中...",
         "goes_offline": "{channel} がオフラインになりました。切り替え中...",

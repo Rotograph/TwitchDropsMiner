@@ -5,6 +5,7 @@
         "terminated": "\nL'application a été arrêtée.\nVeuillez fermer l'application.",
         "watching": "En train de regarder : {channel}",
         "idle_watching": "Idle watching {channel}",
+        "idle_watching_points": "Idle watching {channel}: {points} channel points",
         "mining_resumed": "Collecte reprise",
         "goes_online": "{channel} passe EN LIGNE, changement...",
         "goes_offline": "{channel} passe HORS LIGNE, changement...",
