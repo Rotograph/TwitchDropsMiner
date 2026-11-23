@@ -5,9 +5,12 @@ import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import pytest
 
-from src.exceptions import MinerException
+from src.api.gql_client import GQLClient
+from src.config import ClientType
+from src.exceptions import GQLException, MinerException
 from src.services.idle_watch import STREAK_SHARE_CHECK_SECONDS, IdleWatchService
 
 
@@ -15,8 +18,8 @@ def milestone(mid="m1", *, category="WATCH_STREAK", state="ACTIVE", share="CAN_S
     return {"id": mid, "category": category, "value": value, "state": state, "shareStatus": share}
 
 
-def read(rows):
-    return {"data": {"user": {"channel": {"id": "123", "self": {"viewerMilestones": rows}}}}}
+def read(rows, channel_id="123"):
+    return {"data": {"user": {"channel": {"id": channel_id, "self": {"viewerMilestones": rows}}}}}
 
 
 SHARE_OK = {"data": {"shareViewerMilestone": {"milestone": {"id": "m1"}, "error": None}}}
@@ -26,9 +29,10 @@ def make_gql(reads, shares=None):
     """Answers a batch of reads with `reads` (one per login) and a share with the next of `shares`."""
     shares = list(shares or [SHARE_OK])
 
-    async def gql(op):
+    async def gql(op, retry=True):
         if isinstance(op, list):
             return reads
+        assert retry is False  # a share is never resent by the client
         assert "shareViewerMilestone" in op["query"]
         item = shares.pop(0) if len(shares) > 1 else shares[0]
         if isinstance(item, Exception):
@@ -195,3 +199,218 @@ async def test_tick_runs_the_check_only_while_the_loop_is_active():
     await svc._tick()
     assert len(reads(tw)) == 1
     assert len(shares(tw)) == 1
+
+
+def add_channel(tw, cid=456, login="b"):
+    tw.channels[cid] = SimpleNamespace(id=cid, name=login.upper(), login=login, online=True, banned=False)
+    tw.settings.idle_channels.append(login)
+
+
+def real_client(monkeypatch, answer):
+    """A real GQLClient whose transport is the browser path, answering each request with answer(op)."""
+    monkeypatch.setattr("src.api.gql_client.asyncio.sleep", AsyncMock())
+    browser = SimpleNamespace(gql=AsyncMock(side_effect=answer))
+    auth = SimpleNamespace(validate=AsyncMock(return_value=SimpleNamespace(
+        browser_active=True, _twitch=SimpleNamespace(_browser=browser),
+    )))
+    return GQLClient(MagicMock(), auth, ClientType.WEB), browser
+
+
+def sent_shares(browser):
+    return [c.args[0] for c in browser.gql.call_args_list if not isinstance(c.args[0], list)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message", ["service timeout", "service unavailable", "context deadline exceeded", "service error"])
+async def test_one_share_attempt_sends_the_mutation_once(monkeypatch, caplog, message):
+    # item 1: a retryable error reply on a share is a failed attempt, never a resend
+    replies = [{"errors": [{"message": message}]}] * 2 + [SHARE_OK]
+
+    async def answer(op):
+        return [read([milestone()])] if isinstance(op, list) else replies.pop(0)
+
+    client, browser = real_client(monkeypatch, answer)
+    svc, _ = setup(gql=client.request)
+    with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
+        await svc.share_streaks()
+    assert len(sent_shares(browser)) == 1
+    assert caplog.messages == ["Twitch request ShareViewerMilestone failed (GQLException)"]
+    # the next check is the second and last attempt
+    for _ in range(2):
+        svc._share_checked -= STREAK_SHARE_CHECK_SECONDS
+        await svc.share_streaks()
+    assert len(sent_shares(browser)) == 2
+
+
+@pytest.mark.asyncio
+async def test_read_answer_for_another_channel_is_skipped():
+    # item 2: answers are matched to channels by the channel id they carry, not by position alone
+    svc, tw = setup(gql=make_gql([read([milestone("m1")], "999"), read([milestone("m2")], "456")]))
+    add_channel(tw)
+    await svc.share_streaks()
+    assert [op["variables"]["input"] for op in shares(tw)] == [{"channelID": "456", "milestoneID": "m2"}]
+
+
+def _stop_loop(svc, tw):
+    svc._task = MagicMock(done=lambda: True)
+
+
+def _setting_off(svc, tw):
+    tw.settings.share_watch_streaks = False
+
+
+def _unlisted(svc, tw):
+    tw.settings.idle_channels.remove("a")
+
+
+def _drops_channel(svc, tw):
+    tw.can_watch.return_value = True
+
+
+FLIPS = [_stop_loop, _setting_off, _unlisted, _drops_channel]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flip", FLIPS)
+async def test_guards_are_checked_again_before_each_share(flip):
+    # item 3: state can change while the read is in flight
+    svc, tw = setup()
+    inner = make_gql([read([milestone()])])
+
+    async def gql(op, retry=True):
+        if isinstance(op, list):
+            flip(svc, tw)
+        return await inner(op, retry=retry)
+
+    tw.gql_request = AsyncMock(side_effect=gql)
+    await svc.share_streaks()
+    assert shares(tw) == []
+    # a skipped share does not use up an attempt
+    assert svc._share_tries == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flip", FLIPS)
+async def test_state_change_during_a_share_stops_the_next_one(flip):
+    svc, tw = setup()
+    inner = make_gql([read([milestone("m1"), milestone("m2")])])
+
+    async def gql(op, retry=True):
+        result = await inner(op, retry=retry)
+        if not isinstance(op, list):
+            flip(svc, tw)
+        return result
+
+    tw.gql_request = AsyncMock(side_effect=gql)
+    await svc.share_streaks()
+    assert [op["variables"]["input"]["milestoneID"] for op in shares(tw)] == ["m1"]
+
+
+@pytest.mark.asyncio
+async def test_failed_batch_falls_back_to_one_read_per_channel(caplog):
+    # item 4: one channel's unrecognised error must not hide the other channels' streaks
+    async def gql(op, retry=True):
+        if isinstance(op, list):
+            if len(op) > 1 or op[0]["variables"]["login"] == "a":
+                raise GQLException("bad entry")
+            return [read([milestone("m2")], "456")]
+        return SHARE_OK
+
+    svc, tw = setup(gql=AsyncMock(side_effect=gql))
+    add_channel(tw)
+    with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
+        await svc.share_streaks()
+    assert [len(ops) for ops in reads(tw)] == [2, 1, 1]
+    assert [op["variables"]["input"] for op in shares(tw)] == [{"channelID": "456", "milestoneID": "m2"}]
+    assert caplog.messages == ["Twitch request ViewerMilestones failed (GQLException)"]
+    assert "bad entry" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [GQLException("x"), MinerException("x"), aiohttp.ClientError("x"), TimeoutError()])
+@pytest.mark.parametrize("two", [False, True])
+async def test_no_fallback_for_a_single_read_or_a_transport_failure(error, two):
+    svc, tw = setup(gql=AsyncMock(side_effect=error))
+    if two:
+        add_channel(tw)
+    await svc.share_streaks()
+    assert tw.gql_request.call_count == (3 if two and isinstance(error, GQLException) else 1)
+    assert shares(tw) == []
+
+
+@pytest.mark.asyncio
+async def test_raw_ops_carry_their_operation_name():
+    # item 5: the name is sent and matches the one in the query text
+    svc, tw = setup()
+    await svc.share_streaks()
+    [[read_op]] = reads(tw)
+    [share_op] = shares(tw)
+    assert read_op["operationName"] == "ViewerMilestones"
+    assert "query ViewerMilestones(" in read_op["query"]
+    assert share_op["operationName"] == "ShareViewerMilestone"
+    assert "mutation ShareViewerMilestone(" in share_op["query"]
+
+
+@pytest.mark.asyncio
+async def test_request_warnings_use_a_neutral_prefix(caplog):
+    # item 6
+    svc, _ = setup(gql=make_gql([read([milestone()])], [{"errors": [{"message": "x"}]}]))
+    with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
+        await svc.share_streaks()
+    assert caplog.messages == ["Twitch request ShareViewerMilestone returned errors"]
+
+
+@pytest.mark.asyncio
+async def test_a_higher_value_of_the_same_streak_is_shared_again():
+    # item 7: Twitch may keep the id while the count rises
+    current = [read([milestone(value="9")])]
+    svc, tw = setup(gql=make_gql(current))
+    await svc.share_streaks()
+    current[0] = read([milestone(value="10")])
+    for _ in range(2):
+        svc._share_checked -= STREAK_SHARE_CHECK_SECONDS
+        await svc.share_streaks()
+    assert [op["variables"]["input"]["milestoneID"] for op in shares(tw)] == ["m1", "m1"]
+
+
+@pytest.mark.asyncio
+async def test_refusals_of_one_value_do_not_block_the_next_value():
+    refused = {"data": {"shareViewerMilestone": {"milestone": None, "error": {"code": "NOT_ALLOWED"}}}}
+    current = [read([milestone(value="9")])]
+    svc, tw = setup(gql=make_gql(current, [refused, refused, SHARE_OK]))
+    for _ in range(3):
+        await svc.share_streaks()
+        svc._share_checked -= STREAK_SHARE_CHECK_SECONDS
+    assert len(shares(tw)) == 2
+    current[0] = read([milestone(value="10")])
+    await svc.share_streaks()
+    assert len(shares(tw)) == 3
+
+
+@pytest.mark.asyncio
+async def test_early_check_request_waits_for_a_live_channel():
+    # item 8: a request that finds no live channel is kept for the next tick
+    svc, tw = setup(online=False)
+    svc._share_checked = time.monotonic()
+    svc._share_now = True
+    await svc.share_streaks()
+    assert svc._share_now is True
+    tw.channels[123].online = True
+    await svc.share_streaks()
+    assert svc._share_now is False
+    assert len(reads(tw)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [None, ["9"], {"n": 9}, True])
+async def test_share_without_a_usable_value_logs_no_count(caplog, value):
+    row = milestone()
+    if value is None:
+        del row["value"]
+    else:
+        row["value"] = value
+    svc, tw = setup(rows=[row])
+    with caplog.at_level(logging.INFO, logger="TwitchDrops"):
+        await svc.share_streaks()
+    assert len(shares(tw)) == 1
+    assert caplog.messages == ["Shared watch streak on A"]

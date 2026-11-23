@@ -106,7 +106,7 @@ async def test_streak_reason_ends_visit():
     svc.poke.assert_not_called()
     await svc.process_points(1, earned("WATCH_STREAK"))
     assert svc.visit.done
-    svc.poke.assert_called()
+    svc.poke.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -163,7 +163,7 @@ async def test_claim_in_flight_is_sent_once():
 
     release = asyncio.Event()
 
-    async def slow(_op):
+    async def slow(_op, **_):
         await release.wait()
         return {"data": {}}
 

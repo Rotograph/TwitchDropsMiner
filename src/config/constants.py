@@ -119,10 +119,13 @@ class GQLQuery(JsonType):
 class GQLRawQuery(JsonType):
     """Raw GraphQL query operation without persisted query hash."""
 
-    def __init__(self, query: str, variables: JsonType | None = None):
+    def __init__(self, query: str, variables: JsonType | None = None, operation_name: str | None = None):
         super().__init__(query=query)
         if variables is not None:
             self.__setitem__("variables", variables)
+        if operation_name is not None:
+            # must match the name in the query; Twitch echoes it in error replies
+            self.__setitem__("operationName", operation_name)
 
 
 class WebsocketTopic:

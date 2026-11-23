@@ -368,7 +368,9 @@ async def test_malformed_and_errored_rows_do_not_abort_discovery_or_create_bans(
     [{"errors": [{"message": "server error"}], "data": None}],
     [{"errors": [{"message": "server error", "path": ["user"]}], "data": None}],
 ])
-async def test_actual_gql_error_normalization_failure_does_not_abort_optional_filter(response):
+async def test_actual_gql_error_normalization_failure_does_not_abort_optional_filter(response, monkeypatch):
+    # a service error reply without extensions is now retried once instead of raising KeyError
+    monkeypatch.setattr("src.api.gql_client.asyncio.sleep", AsyncMock())
     client = _client()
     channel = _channel(client)
     client._browser = SimpleNamespace(gql=AsyncMock(return_value=response))
