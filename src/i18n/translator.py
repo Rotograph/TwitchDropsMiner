@@ -311,6 +311,16 @@ class GUISettings(TypedDict):
     prefer_followed_channels: str
     prefer_followed_channels_help: str
     prefer_followed_channels_save_error: str
+    idle_channels: str
+    idle_channels_help: str
+    idle_channels_add: str
+    idle_channels_remove: str
+    idle_channels_up: str
+    idle_channels_down: str
+    idle_channels_save_error: str
+    claim_channel_points: str
+    claim_channel_points_help: str
+    claim_channel_points_save_error: str
     general: GUISettingsGeneral
     tab_mining: str
     tab_games: str

@@ -255,6 +255,15 @@ still be claimed through existing notifications or work already underway. It doe
 not guarantee Twitch-side progress. Reload the dashboard after upgrading to load the
 versioned frontend controls.
 
+## Idle watching
+
+**Settings -> Mining -> Idle watching channels** lists Twitch channels (lowercase logins, at most 20) that TDM watches when nothing can be mined. Idle watching runs only when no drop can be mined and only inside mining hours.
+
+- Each live listed channel gets one visit of up to 7 minutes per stream, to count toward its watch streak.
+- After the visits, TDM watches the highest live listed channel for channel points. The order of the list is the priority.
+- **Claim channel points bonus while idle watching** (on by default) claims the channel points bonus. It claims only while idle watching, never while mining drops.
+- Streak counting is untested until it is confirmed live. Treat it as unverified.
+
 ## Pause mining
 
 Select **Pause** in the status bar and choose **For 10 minutes**, **For 1 hour**,
