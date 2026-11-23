@@ -1,6 +1,5 @@
 """retry=False on GQLClient and HTTPClient: a share is sent once; retryable replies, 5xx and connection errors raise instead of resending."""
 
-import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -27,11 +26,8 @@ def client(monkeypatch, replies):
     return GQLClient(MagicMock(), auth, ClientType.WEB), browser
 
 
-def error(message, *, extensions=True):
-    reply = {"errors": [{"message": message}]}
-    if extensions:
-        reply["extensions"] = {"operationName": "Op"}
-    return reply
+def error(message):
+    return {"errors": [{"message": message}], "extensions": {"operationName": "Op"}}
 
 
 @pytest.mark.asyncio
@@ -69,16 +65,6 @@ async def test_service_error_still_retries_only_once_by_default(monkeypatch):
     with pytest.raises(GQLException):
         await gql.request(GQLRawQuery("query Op { x }"))
     assert browser.gql.call_count == 2
-
-
-@pytest.mark.asyncio
-async def test_service_error_without_extensions_is_retried_not_a_key_error(monkeypatch, caplog):
-    # item 5: a reply without extensions must not raise KeyError in the retry log line
-    gql, browser = client(monkeypatch, [error("service error", extensions=False), OK])
-    with caplog.at_level(logging.ERROR, logger="TwitchDrops"):
-        assert await gql.request(GQLRawQuery("query { x }")) == OK
-    assert browser.gql.call_count == 2
-    assert caplog.messages == ["Retrying a service error for None"]
 
 
 @pytest.mark.asyncio

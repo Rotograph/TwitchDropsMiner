@@ -145,7 +145,7 @@ async def test_claim_reply_with_error_field_is_not_marked(caplog):
         await svc.process_points(1, claim_msg())
     assert "abc" not in svc._claimed
     assert not [r for r in caplog.records if r.levelno == logging.INFO]
-    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+    assert caplog.messages == ["Twitch request ClaimCommunityPoints was not accepted (NOT_FOUND)"]
 
 
 @pytest.mark.asyncio
@@ -300,3 +300,26 @@ async def test_empty_claim_id_is_not_sent():
     await svc.process_points(1, claim_msg(claim_id=""))
     await svc.refresh_points(watched)
     assert [o["operationName"] for o in sent(tw)] == ["ChannelPointsContext"]
+
+
+@pytest.mark.asyncio
+async def test_points_context_timeout_uses_the_request_prefix(caplog, monkeypatch):
+    # the 15 s limit is a literal: a wait_for that times out at once stands in for it
+    async def timed_out(coro, timeout):
+        coro.close()
+        raise TimeoutError
+
+    svc, tw, watched = setup()
+    monkeypatch.setattr("src.services.idle_watch.asyncio.wait_for", timed_out)
+    with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
+        await svc.refresh_points(watched)
+    assert caplog.messages == ["Twitch request ChannelPointsContext timed out"]
+
+
+@pytest.mark.asyncio
+async def test_list_reply_to_a_single_claim_is_rejected(caplog):
+    svc, tw, _ = setup(gql=AsyncMock(return_value=[CLAIM_OK]))
+    with caplog.at_level(logging.INFO, logger="TwitchDrops"):
+        await svc.process_points(1, claim_msg())
+    assert "abc" not in svc._claimed
+    assert caplog.messages == ["Twitch request ClaimCommunityPoints returned errors"]

@@ -80,8 +80,8 @@ class IdleWatchService:
         self._claiming: set[str] = set()
         self._raw_logged = False
         # watch streak sharing: (milestone id, value) shared this run, attempts per key, last read, early-check request
-        self._shared: set[tuple[str, str | int | None]] = set()
-        self._share_tries: dict[tuple[str, str | int | None], int] = {}
+        self._shared: set[tuple[str, str | None]] = set()
+        self._share_tries: dict[tuple[str, str | None], int] = {}
         self._share_checked: float | None = None
         self._share_now = False
         # the channel the loop chose to watch, and the visit it last announced
@@ -241,8 +241,12 @@ class IdleWatchService:
         except (MinerException, aiohttp.ClientError, TimeoutError) as exc:
             logger.warning("Twitch request %s failed (%s)", name, type(exc).__name__)
             return None
-        # a batch answers with a list; its entries are checked by the caller
-        if isinstance(response, list) or (isinstance(response, dict) and not response.get("errors")):
+        if isinstance(op, list):
+            # a batch answers with a list; its entries are checked by the caller
+            usable = isinstance(response, list)
+        else:
+            usable = isinstance(response, dict) and not response.get("errors")
+        if usable:
             return response
         logger.warning("Twitch request %s returned errors", name)
         return None
@@ -274,7 +278,7 @@ class IdleWatchService:
             # the reply carries an error code (for example an already claimed bonus) instead of the claim
             code = error.get("code") if isinstance(error, dict) else error
             logger.warning(
-                "Channel points request ClaimCommunityPoints was not accepted%s",
+                "Twitch request ClaimCommunityPoints was not accepted%s",
                 f" ({code})" if isinstance(code, str) else "",
             )
             return
@@ -289,7 +293,7 @@ class IdleWatchService:
                 15,
             )
         except TimeoutError:
-            logger.warning("Channel points request ChannelPointsContext timed out")
+            logger.warning("Twitch request ChannelPointsContext timed out")
             return
         try:
             points = response["data"]["community"]["channel"]["self"]["communityPoints"]  # type: ignore[index]
@@ -326,8 +330,10 @@ class IdleWatchService:
         response = await self._gql(ops, MILESTONES_OPERATION)
         answers = response if isinstance(response, list) else []
         for channel, answer in zip(live, answers, strict=False):
+            # at most one share sent per channel per check; the rest wait for the next check
             for milestone in self._shareable(answer, channel):
-                await self._share(channel, milestone)
+                if await self._share(channel, milestone):
+                    break
 
     @staticmethod
     def _shareable(answer: object, channel: Channel) -> list[JsonType]:
@@ -357,20 +363,22 @@ class IdleWatchService:
         return (
             self.active
             and tw.settings.share_watch_streaks
-            and channel.login in tw.settings.idle_channels
+            and channel in self.live_channels()
             and not tw.can_watch(channel)
         )
 
-    async def _share(self, channel: Channel, milestone: JsonType) -> None:
-        milestone_id, value = milestone["id"], milestone.get("value")
-        if not isinstance(value, (str, int)) or isinstance(value, bool):
-            value = None
-        # a streak can keep its id while its count rises: each value is its own share
+    async def _share(self, channel: Channel, milestone: JsonType) -> bool:
+        """Send one share unless it is done, used up or no longer allowed; True when it was sent."""
+        milestone_id, raw_value = milestone["id"], milestone.get("value")
+        # a streak can keep its id while its count rises: each value is its own share; 9 and "9" are one
+        value = str(raw_value) if isinstance(raw_value, (str, int)) and not isinstance(raw_value, bool) else None
         key = (milestone_id, value)
-        if key in self._shared or self._share_tries.get(key, 0) >= STREAK_SHARE_ATTEMPTS or not self._may_share(channel):
-            return
-        # the attempt counts before the request, so a transport failure uses one up
-        self._share_tries[key] = self._share_tries.get(key, 0) + 1
+        tries = self._share_tries.get(key, 0)
+        if key in self._shared or tries >= STREAK_SHARE_ATTEMPTS or not self._may_share(channel):
+            return False
+        # Until a reply says Twitch refused it, the outcome is unknown and the share may be posted:
+        # all attempts are used before sending, so a failure, timeout or cancellation is never resent.
+        self._share_tries[key] = STREAK_SHARE_ATTEMPTS
         # sent once (retry=False): a resend could post a second notice in the streamer's chat
         response = await self._gql(
             GQLRawQuery(
@@ -381,23 +389,30 @@ class IdleWatchService:
             retry=False,
         )
         if response is None:
-            return
+            return True  # _gql logged it
         try:
             result = response["data"]["shareViewerMilestone"]  # type: ignore[index,call-overload]
-            error = result.get("error") if isinstance(result, dict) else True
         except (KeyError, TypeError):
-            result, error = None, True
-        if not isinstance(result, dict) or error is not None:
-            code = error.get("code") if isinstance(error, dict) else None
+            result = None
+        error = result.get("error") if isinstance(result, dict) else None
+        if isinstance(error, dict):
+            # an explicit error object: Twitch refused it, so one more try in a later check is safe
+            self._share_tries[key] = tries + 1
+            code = error.get("code")
             logger.warning(
                 "Watch streak share on %s was not accepted%s", channel.name, f" ({code})" if isinstance(code, str) else "",
             )
-            return
+            return True
+        # anything but the shared milestone back is an unknown outcome: not resent, and not reported as shared
         self._shared.add(key)
-        if value is None:
+        shared = result.get("milestone") if isinstance(result, dict) and error is None else None
+        if not isinstance(shared, dict) or shared.get("id") != milestone_id:
+            logger.warning("Watch streak share on %s returned an unexpected reply", channel.name)
+        elif value is None:
             logger.info("Shared watch streak on %s", channel.name)
         else:
             logger.info("Shared watch streak on %s (%s streams)", channel.name, value)
+        return True
 
     @task_wrapper
     async def process_points(self, user_id: int, message: JsonType) -> None:

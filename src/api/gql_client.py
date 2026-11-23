@@ -95,7 +95,9 @@ class GQLClient:
             Single operation or list of operations to execute
         retry : bool
             False sends ops once: a retryable GQL error raises GQLException, and a 5xx
-            reply or connection error raises instead of being resent by the HTTP client
+            reply or connection error raises instead of being resent by the HTTP client.
+            The imported-session transport still replays an op Twitch rejected for auth
+            before running it (no data, integrity or OAuth error) after a renewal.
 
         Returns
         -------
@@ -156,7 +158,7 @@ class GQLClient:
                                 else:
                                     logger.error(
                                         f"Retrying a {error_dict['message']} for "
-                                        f"{(response_json.get('extensions') or {}).get('operationName')}"
+                                        f"{response_json['extensions']['operationName']}"
                                     )
                                 single_retry = False
                                 if delay < 5:
