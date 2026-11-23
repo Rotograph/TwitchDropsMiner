@@ -1,6 +1,6 @@
 # Idle watch and channel points: design
 
-Date: 2026-11-23. Branch: `feat/idle-watch-points` (from `docs/open-reward-campaigns`). Status: draft for the owner.
+Branch: `feat/idle-watch-points` (from `docs/open-reward-campaigns`). Status: draft for the owner.
 
 ## Intent
 

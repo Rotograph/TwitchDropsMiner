@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3 asyncio, aiohttp GQL client already in TDM, pydantic `SettingsUpdate`, vanilla JS dashboard (`web/static/app.js`, `web/index.html`), pytest with the repository's node-based frontend helpers.
 
-**Spec:** `docs/superpowers/specs/2026-11-23-idle-watch-channel-points-design.md`
+**Spec:** `docs/superpowers/specs/idle-watch-channel-points-design.md`
 
 ## Global Constraints
 
