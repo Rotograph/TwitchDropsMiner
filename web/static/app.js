@@ -2851,7 +2851,10 @@ async function saveIdleChannels(next) {
 async function addIdleChannel() {
     const input = document.getElementById('idle-channel-input');
     const current = state.settings.idle_channels || [];
-    const login = input.value.trim().toLowerCase(); // the server stores logins stripped and lowercase
+    // ASCII before toLowerCase, like the server: the Kelvin sign would lowercase to an ASCII "k".
+    const login = /^[\x00-\x7f]*$/.test(input.value)
+        ? input.value.trim().toLowerCase() // the server stores logins stripped and lowercase
+        : '';
     if (!idleChannelPattern.test(login) || current.includes(login) || current.length >= idleChannelLimit) {
         const error = document.getElementById('idle-channels-error');
         reportSettingsError(error, state.translations.gui?.settings?.idle_channels_save_error ||
@@ -3256,7 +3259,7 @@ function applyTranslations(t) {
             const featuresItems = t.gui.help.features_items || [
                 'Stream-less drop mining - saves bandwidth',
                 'Game priority and exclusion lists',
-                'Tracks up to 199 channels simultaneously',
+                'Tracks up to 198 channels simultaneously',
                 'Automatic channel switching',
                 'Real-time progress tracking'
             ];

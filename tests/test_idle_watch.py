@@ -184,7 +184,10 @@ def loop_service(live, *, mining=True, idle=("c1",)):
     tw._watching = None
     tw.watch = MagicMock(side_effect=lambda c, update_status=True: setattr(tw, "_watching", c))
     tw.stop_watching = MagicMock()
+    tw.can_watch = MagicMock(return_value=False)
+    tw.change_state = MagicMock()
     tw.gui.status = MagicMock()
+    tw.gui.clear_drop = MagicMock()
     svc.track = AsyncMock(return_value=live)
     svc.live_channels = lambda: live
     return svc, tw
@@ -368,3 +371,264 @@ async def test_whole_request_failure_is_not_a_skip():
         await svc.track()
     await svc.track()
     assert gql.await_count == 2
+
+
+# --- final review fixes ---
+
+
+def handler_twitch(*, active, can_watch=True, should_switch=True, watching=None):
+    tw = MagicMock()
+    tw.settings.idle_channels = ["c1"]
+    tw._idle_watch.active = active
+    tw.watching_channel.get_with_default.return_value = watching
+    tw.can_watch.return_value = can_watch
+    tw.should_switch.return_value = should_switch
+    return tw, MessageHandlerService(tw)
+
+
+def stream():
+    return SimpleNamespace(drops_enabled=True)
+
+
+@pytest.mark.parametrize("before", [None, "live"])
+def test_drop_channel_event_while_idle_hands_over_to_channel_switch(before):
+    # RT1a: online, or a title/tag update that makes a channel mineable
+    tw, handler = handler_twitch(active=True, watching=SimpleNamespace(login="c1"))
+    drop = SimpleNamespace(login="d", name="D", display=MagicMock())
+    handler.on_channel_update(drop, stream() if before else None, stream())
+    tw.watch.assert_not_called()
+    tw.change_state.assert_called_once_with(State.CHANNEL_SWITCH)
+
+
+@pytest.mark.parametrize("before", [None, "live"])
+def test_drop_channel_event_without_idle_watches_directly(before):
+    tw, handler = handler_twitch(active=False, watching=SimpleNamespace(login="x"))
+    drop = SimpleNamespace(login="d", name="D", display=MagicMock())
+    handler.on_channel_update(drop, stream() if before else None, stream())
+    tw.watch.assert_called_once_with(drop)
+    tw.change_state.assert_not_called()
+
+
+@pytest.mark.parametrize("after", [None, "live"])
+def test_idle_watched_channel_offline_or_update_pokes_instead_of_switch(after):
+    # RT4: offline, and a title/tag change of the idle channel that drops cannot use
+    idle = SimpleNamespace(login="c1", name="C1", display=MagicMock())
+    tw, handler = handler_twitch(active=True, can_watch=False, watching=idle)
+    handler.on_channel_update(idle, stream(), stream() if after else None)
+    tw.change_state.assert_not_called()
+    tw._idle_watch.poke.assert_called_once()
+    tw, handler = handler_twitch(active=False, can_watch=False, watching=idle)
+    handler.on_channel_update(idle, stream(), stream() if after else None)
+    tw.change_state.assert_called_once_with(State.CHANNEL_SWITCH)
+
+
+def test_idle_watched_channel_becoming_mineable_pokes_the_loop():
+    idle = SimpleNamespace(login="c1", name="C1", display=MagicMock())
+    tw, handler = handler_twitch(active=True, can_watch=True, watching=idle)
+    handler.on_channel_update(idle, stream(), stream())
+    tw._idle_watch.poke.assert_called_once()
+    tw.watch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_loop_hands_a_mineable_watched_channel_to_drops(monkeypatch, caplog):
+    # RT1b: the loop must not take the watch back from a drop channel
+    monkeypatch.setattr(idle_mod, "IDLE_TICK_SECONDS", 0.01)
+    a, drop = fake(1, 10, login="c1"), fake(9, 90, login="d")
+    a.name, drop.name = "A", "D"
+    svc, tw = loop_service([a])
+    tw._watching = drop
+    tw.can_watch = MagicMock(side_effect=lambda c: c is drop)
+    with caplog.at_level(logging.INFO, logger="TwitchDrops"):
+        svc.enter()
+        await asyncio.sleep(0.05)
+    tw.watch.assert_not_called()
+    tw.stop_watching.assert_not_called()
+    tw.change_state.assert_called_once_with(State.CHANNEL_SWITCH)
+    assert not svc.active
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_base_topics_match_the_user_topics_subscribed_at_login():
+    # RT2: every User topic subscribed in _run must be counted in BASE_TOPICS
+    from src.config import (
+        BASE_TOPICS,
+        MAX_TOPICS,
+        MAX_WEBSOCKETS,
+        TOPICS_PER_CHANNEL,
+        WS_TOPICS_LIMIT,
+    )
+
+    src = inspect.getsource(Twitch._run)
+    user_topics = re.findall(r'WebsocketTopic\(\s*"User"', src)
+    assert len(user_topics) == BASE_TOPICS
+    assert MAX_CHANNELS * TOPICS_PER_CHANNEL + BASE_TOPICS <= MAX_WEBSOCKETS * WS_TOPICS_LIMIT
+    assert MAX_TOPICS + BASE_TOPICS == MAX_WEBSOCKETS * WS_TOPICS_LIMIT
+
+
+def test_idle_list_change_reruns_idle_step_without_games_update():
+    # RT3: the client side of an idle_channels edit
+    client = client_stub(flag=True)
+    client._games_update_pending = False
+    client._idle_watch.active = True
+    client.idle_channels_changed()
+    client._state_change.set.assert_called_once()
+    client._idle_watch.poke.assert_called_once()
+    assert client._games_update_pending is False
+    client = client_stub(flag=False)
+    client._state = State.CHANNEL_SWITCH
+    client.idle_channels_changed()
+    client._state_change.set.assert_not_called()
+    client._idle_watch.poke.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_unexpected_tick_error_is_logged_and_the_loop_continues(monkeypatch, caplog):
+    # RT5
+    monkeypatch.setattr(idle_mod, "IDLE_TICK_SECONDS", 0.01)
+    a = fake(1, 10)
+    a.name = "A"
+    svc, tw = loop_service([a])
+    svc.track = AsyncMock(side_effect=[KeyError("k"), RuntimeError("r")] + [[a]] * 50)
+    with caplog.at_level(logging.INFO, logger="TwitchDrops"):
+        svc.enter()
+        await asyncio.sleep(0.1)
+        assert svc.active
+        task = svc._task
+        svc.stop()
+        await asyncio.gather(task, return_exceptions=True)
+    assert task.cancelled()
+    assert svc.track.await_count >= 3
+    tw.watch.assert_called()
+    assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 2
+
+
+@pytest.mark.parametrize("pending", ["inventory", "games"])
+def test_pending_state_activation_stops_idle_watch(pending):
+    # RT7
+    client = client_stub(flag=True)
+    client.settings = SimpleNamespace(mining_hours={"mode": "always"})
+    client._paused = False
+    client._inventory_refresh_pending = pending == "inventory"
+    client._games_update_pending = pending == "games"
+    client._inventory_loaded = True
+    if pending == "inventory":
+        client._activate_pending_inventory_refresh()
+    else:
+        client._activate_pending_games_update()
+    assert client._state is (State.INVENTORY_FETCH if pending == "inventory" else State.GAMES_UPDATE)
+    client._idle_watch.stop.assert_called_once()
+    assert client._idle_watch_allowed is False
+
+
+@pytest.mark.asyncio
+async def test_poke_during_a_tick_is_not_lost(monkeypatch):
+    # RT8: a poke that arrives during track() must run another tick at once
+    monkeypatch.setattr(idle_mod, "IDLE_TICK_SECONDS", 5)
+    a = fake(1, 10)
+    a.name = "A"
+    svc, _ = loop_service([a])
+    calls = []
+
+    async def track():
+        calls.append(1)
+        if len(calls) == 1:
+            svc.poke()
+        return [a]
+
+    svc.track = track
+    svc.enter()
+    await asyncio.sleep(0.1)
+    svc.stop()
+    assert len(calls) >= 2
+
+
+@pytest.mark.asyncio
+async def test_idle_start_clears_drop_panel_and_rerun_keeps_idle_status(monkeypatch):
+    # RT9
+    monkeypatch.setattr(idle_mod, "IDLE_TICK_SECONDS", 5)
+    a = fake(1, 10)
+    a.name = "A"
+    svc, tw = loop_service([a])
+    svc.enter()
+    await asyncio.sleep(0.03)
+    tw.gui.clear_drop.assert_called_once()
+    tw.gui.status.update.reset_mock()
+    svc.show_status()
+    assert "Idle watching A" in tw.gui.status.update.call_args.args[0]
+    tw._watching = fake(2, 20)
+    tw.gui.status.update.reset_mock()
+    svc.show_status()
+    tw.gui.status.update.assert_not_called()
+    svc.stop()
+
+
+def test_idle_branch_rerun_reshows_idle_status():
+    client = client_stub(flag=True)
+    client._idle_watch_step()
+    client._idle_watch.show_status.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_authentication_change_drains_idle_task_and_forgets_account_state(tmp_path, monkeypatch):
+    # RT6 and RT10
+    from tests.test_session_lifecycle import miner
+
+    client = miner(tmp_path, monkeypatch)
+    client.websocket.stop = AsyncMock()
+    svc = client._idle_watch
+    entered, cleaned = asyncio.Event(), asyncio.Event()
+
+    async def run():
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            cleaned.set()
+
+    svc._task = asyncio.create_task(run())
+    task = svc._task
+    await entered.wait()
+    svc.balances[1] = 5
+    svc.visited.add(10)
+    svc.visit = idle_mod.Visit(1, 10, 0.0)
+    svc._skipped.add("x")
+    svc._claimed.add("c")
+    svc._seen_list = ["x"]
+    async with client.authentication_change():
+        assert cleaned.is_set() and task.done()
+    assert not svc.active
+    assert (svc.balances, svc.visited, svc.visit, svc._skipped, svc._claimed, svc._seen_list) == (
+        {}, set(), None, set(), set(), None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_short_batch_reply_skips_unanswered_logins(caplog):
+    # F5
+    gql = AsyncMock(return_value=[user(1, "a", live=False)])
+    svc, _ = service(idle=["a", "b", "c"], gql=gql)
+    with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
+        await svc.track()
+        await svc.track()
+    assert gql.await_count == 1
+    assert caplog.text.count("skipped") == 2
+
+
+@pytest.mark.asyncio
+async def test_banned_logins_warn_once(caplog):
+    gql = AsyncMock(return_value=[user(1, "a", live=False), user(2, "b", live=False)])
+    tracked_banned = fake(3, 3, login="c", banned=True)
+    svc, twitch = service({3: tracked_banned}, idle=["a", "b", "c"], gql=gql)
+
+    twitch._channel_service.filter_banned_channels = AsyncMock(
+        side_effect=lambda chans: [c for c in chans if c.id != 2],
+    )
+    with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
+        await svc.track()
+        await svc.track()
+    banned = [r for r in caplog.records if "banned" in r.getMessage()]
+    assert sorted(r.getMessage() for r in banned) == [
+        "Idle channel b skipped: banned", "Idle channel c skipped: banned",
+    ]

@@ -289,7 +289,7 @@
             "features_items": [
                 "Stream-less drop mining - saves bandwidth",
                 "Game priority and exclusion lists",
-                "Tracks up to 199 channels simultaneously",
+                "Tracks up to 198 channels simultaneously",
                 "Automatic channel switching",
                 "Real-time progress tracking"
             ],

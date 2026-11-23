@@ -21,6 +21,7 @@ def setup(*, active=True, claim=True, watched=None, gql=None):
         gql_request=gql or AsyncMock(return_value={"data": {}}),
         gui=SimpleNamespace(status=MagicMock()),
         watching_channel=SimpleNamespace(get_with_default=lambda d: watched),
+        can_watch=MagicMock(return_value=False),
     )
     svc = IdleWatchService(tw)
     svc._task = MagicMock(done=lambda: not active)
@@ -106,15 +107,82 @@ async def test_streak_reason_ends_visit():
 
 
 @pytest.mark.asyncio
-async def test_claim_reason_logs_one_info(caplog):
+async def test_one_info_per_claim(caplog):
+    # F3: the successful claim logs the INFO line; the CLAIM points-earned only DEBUG
     svc, _, _ = setup()
-    with caplog.at_level(logging.INFO, logger="TwitchDrops"):
+    with caplog.at_level(logging.DEBUG, logger="TwitchDrops"):
+        await svc.process_points(1, claim_msg())
         await svc.process_points(1, earned("WATCH"))
         await svc.process_points(1, earned("CLAIM", gain=50))
     infos = [r for r in caplog.records if r.levelno == logging.INFO]
-    assert len(infos) == 1
-    assert "A" in infos[0].getMessage() and "50" in infos[0].getMessage()
-    assert "1510" not in caplog.text
+    assert [r.getMessage() for r in infos] == ["Claimed channel points bonus on A"]
+    assert any("50" in r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG)
+    assert all("1510" not in r.getMessage() for r in caplog.records if r.levelno > logging.DEBUG)
+
+
+@pytest.mark.asyncio
+async def test_failed_claim_logs_no_info_and_is_retried(caplog):
+    # F1: a failed request must not mark the claim as done
+    gql = AsyncMock(side_effect=[TimeoutError(), {"data": {}}, {"data": {}}])
+    svc, tw, _ = setup(gql=gql)
+    with caplog.at_level(logging.INFO, logger="TwitchDrops"):
+        await svc.process_points(1, claim_msg())
+        assert not [r for r in caplog.records if r.levelno == logging.INFO]
+        await svc.process_points(1, claim_msg())
+        await svc.process_points(1, claim_msg())
+    assert len(sent(tw)) == 2
+    assert len([r for r in caplog.records if r.levelno == logging.INFO]) == 1
+
+
+@pytest.mark.asyncio
+async def test_claim_in_flight_is_sent_once():
+    import asyncio
+
+    release = asyncio.Event()
+
+    async def slow(_op):
+        await release.wait()
+        return {"data": {}}
+
+    svc, tw, _ = setup(gql=AsyncMock(side_effect=slow))
+    first = asyncio.create_task(svc.process_points(1, claim_msg()))
+    await asyncio.sleep(0)
+    second = asyncio.create_task(svc.process_points(1, claim_msg()))
+    await asyncio.sleep(0)
+    assert len(sent(tw)) == 1
+    release.set()
+    await asyncio.wait_for(asyncio.gather(first, second), 1)
+    assert len(sent(tw)) == 1
+
+
+@pytest.mark.asyncio
+async def test_bool_balance_is_ignored():
+    # F7
+    svc, _, _ = setup()
+    await svc.process_points(1, earned("WATCH", balance=True))
+    assert svc.balances == {}
+
+
+@pytest.mark.asyncio
+async def test_no_claim_on_a_channel_drops_can_use():
+    # RT1: a mineable channel is not idle watched, even if the loop has not noticed yet
+    svc, tw, _ = setup()
+    tw.can_watch.return_value = True
+    await svc.process_points(1, claim_msg())
+    await svc.process_points(1, earned("WATCH"))
+    assert sent(tw) == []
+    tw.gui.status.update.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_unexpected_points_error_is_logged_like_process_drops(caplog):
+    # RT5: process_points runs as a websocket callback task; task_wrapper logs the traceback
+    # (then re-raises into that task, exactly as for process_drops)
+    svc, _, _ = setup()
+    svc._points_earned = AsyncMock(side_effect=RuntimeError("boom"))
+    with caplog.at_level(logging.ERROR, logger="TwitchDrops"), pytest.raises(RuntimeError):
+        await svc.process_points(1, earned("WATCH"))
+    assert [r.getMessage() for r in caplog.records] == ["Exception in process_points task"]
 
 
 @pytest.mark.asyncio

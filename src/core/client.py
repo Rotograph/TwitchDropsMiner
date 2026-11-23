@@ -224,7 +224,11 @@ class Twitch:
         self._changing_auth = True
         self._resume_mining.clear()
         try:
-            tasks = [task for task in (self._run_task, self._schedule_task, self._watching_task, self._mnt_task)
+            # The idle loop is its own task, not a child of _run: drain it with the others.
+            self._idle_watch_allowed = False
+            idle_task = self._idle_watch.stop()
+            tasks = [task for task in (self._run_task, self._schedule_task, self._watching_task, self._mnt_task,
+                                       idle_task)
                      if task is not None and task is not asyncio.current_task()]
             for task in tasks:
                 task.cancel()
@@ -242,8 +246,7 @@ class Twitch:
             self._inventory_loaded = False
             if self._state is not State.EXIT:
                 self._state = State.IDLE
-            self._idle_watch_allowed = False
-            self._idle_watch.stop()
+            self._idle_watch.reset()
             self._changing_auth = False
             self._resume_mining.set()
 
@@ -333,6 +336,13 @@ class Twitch:
                 self._idle_watch.stop()
         self._state_change.set()
 
+    def idle_channels_changed(self) -> None:
+        """Re-run the IDLE step for an edited idle list; drop mining needs no games update."""
+        if self._state is State.IDLE:
+            self._state_change.set()
+            if self._idle_watch.active:
+                self._idle_watch.poke()
+
     def request_games_update(self) -> bool:
         """Queue a mining-policy recalculation without racing the active state step."""
         if self._state is State.EXIT:
@@ -350,8 +360,8 @@ class Twitch:
             and self._inventory_loaded
             and self._state not in (State.INVENTORY_FETCH, State.EXIT)
         ):
-            self._state = State.GAMES_UPDATE
-            self._state_change.set()
+            # change_state, not a bare assignment: leaving IDLE must stop idle watching
+            self.change_state(State.GAMES_UPDATE)
 
     def request_inventory_refresh(self, *, clear_cache: bool = False) -> bool:
         """Queue an inventory refresh without racing the active state-machine step.
@@ -377,8 +387,8 @@ class Twitch:
             and self._state is not State.EXIT
             and self.is_mining_time()
         ):
-            self._state = State.INVENTORY_FETCH
-            self._state_change.set()
+            # change_state, not a bare assignment: leaving IDLE must stop idle watching
+            self.change_state(State.INVENTORY_FETCH)
 
     def get_change_state_callable(self, state: State) -> abc.Callable[[], None]:
         """Return a callable that changes state when invoked (deferred call for GUI usage)."""
@@ -986,6 +996,8 @@ class Twitch:
     def _idle_watch_step(self) -> None:
         if self._idle_watch_allowed and self._idle_watch.allowed():
             self._idle_watch.enter()
+            # a re-run of the IDLE branch just wrote "Idle" over "Idle watching <channel>"
+            self._idle_watch.show_status()
         else:
             self._idle_watch.stop()
             self.stop_watching()

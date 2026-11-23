@@ -57,12 +57,14 @@ class SettingsManager:
         console: ConsoleOutputManager,
         on_change: Callable[[], None] | None = None,
         on_games_change: Callable[[], None] | None = None,
+        on_idle_channels_change: Callable[[], None] | None = None,
     ):
         self._broadcaster = broadcaster
         self._settings = settings
         self._console = console
         self._on_change = on_change
         self._on_games_change = on_games_change
+        self._on_idle_channels_change = on_idle_channels_change
         self._available_games: list[str] = []
         # Console lines and side effects of applied fields, run only after a successful save.
         self._pending_effects: list[Callable[[], None]] = []
@@ -218,9 +220,12 @@ class SettingsManager:
         should_trigger_update |= self.check_and_update_setting(
             "drop_name_blacklist", drop_name_blacklist, True
         )
-        # Log the count only: the channel names stay out of the console.
-        should_trigger_update |= self.check_and_update_setting(
-            "idle_channels", idle_channels, True, log_formatter=lambda names: f"{len(names)} channels"
+        # Log the count only: the channel names stay out of the console. Drop mining does
+        # not use this list, so it re-runs the idle step instead of a games update.
+        self.check_and_update_setting(
+            "idle_channels", idle_channels, False,
+            lambda _names: self._on_idle_channels_change() if self._on_idle_channels_change else None,
+            log_formatter=lambda names: f"{len(names)} channels",
         )
         self.check_and_update_setting("claim_channel_points", claim_points)
         should_trigger_update |= self.check_and_update_setting(

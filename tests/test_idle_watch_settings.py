@@ -43,11 +43,55 @@ def test_invalid_idle_channels_in_file_do_not_block_load(tmp_path, monkeypatch, 
     assert "My-Channel" not in caplog.text
 
 
+def test_hand_edited_list_keeps_valid_entries(tmp_path, monkeypatch, caplog):
+    # F4: one bad entry must not drop the whole list
+    path = tmp_path / "settings.json"
+    entries = ["Good", "bad-name", "good", 5, "Kelvin"] + [f"c{i}" for i in range(25)]
+    path.write_text(json.dumps({"idle_channels": entries}), encoding="utf-8")
+    monkeypatch.setattr("src.config.settings.SETTINGS_PATH", path)
+    with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
+        settings = Settings()
+    assert settings.idle_channels == ["good"] + [f"c{i}" for i in range(19)]
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "good" not in caplog.text.lower() and "c1" not in caplog.text
+
+
+def test_valid_list_loads_without_warning(tmp_path, monkeypatch, caplog):
+    path = tmp_path / "settings.json"
+    path.write_text('{"idle_channels": ["Foo", "bar"]}', encoding="utf-8")
+    monkeypatch.setattr("src.config.settings.SETTINGS_PATH", path)
+    with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
+        settings = Settings()
+    assert settings.idle_channels == ["foo", "bar"]
+    assert not caplog.records
+
+
+@pytest.mark.parametrize("raw,warned", [('"false"', True), ("0", True), ("null", True), ("false", False)])
+def test_non_bool_claim_setting_loads_as_default_with_one_warning(tmp_path, monkeypatch, caplog, raw, warned):
+    # RT11: the value already falls back to True (merge_json); the warning was missing
+    path = tmp_path / "settings.json"
+    path.write_text(f'{{"claim_channel_points": {raw}}}', encoding="utf-8")
+    monkeypatch.setattr("src.config.settings.SETTINGS_PATH", path)
+    with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
+        settings = Settings()
+    assert settings.claim_channel_points is warned  # every non-bool falls back to the default, True
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == (1 if warned else 0)
+
+
+@pytest.mark.parametrize("login", ["Kelvin", "café", " foo", "foo​"])
+def test_normalize_rejects_non_ascii_before_lowering(login):
+    # F6: the Kelvin sign lowercases to an ASCII "k"
+    with pytest.raises(ValueError, match="invalid_idle_channels"):
+        IdleChannelSettings.normalize([login])
+
+
 def _manager():
     stored = SimpleNamespace(idle_channels=[], claim_channel_points=True, save=MagicMock())
     on_change = MagicMock()
     console = MagicMock()
     manager = SettingsManager(SimpleNamespace(emit=AsyncMock()), stored, console, on_change)
+    manager._on_idle_channels_change = MagicMock()
     return manager, stored, on_change, console
 
 
@@ -58,22 +102,34 @@ def _update(manager, data):
     return asyncio.run(run())
 
 
-def test_settings_update_saves_and_triggers_games_update(caplog):
+def test_settings_update_saves_and_reruns_idle_step_without_games_update(caplog):
+    # RT3: list edits must not restart channel cleanup and refetch while mining
     manager, stored, on_change, console = _manager()
+    idle_change = manager._on_idle_channels_change
     with caplog.at_level(logging.DEBUG, logger="TwitchDrops"):
         response = _update(manager, {"idle_channels": ["Foo"], "claim_channel_points": False})
     assert stored.idle_channels == ["foo"]
     assert stored.claim_channel_points is False
     assert response["idle_channels"] == ["foo"]
     assert response["claim_channel_points"] is False
-    on_change.assert_called_once()
+    on_change.assert_not_called()
+    idle_change.assert_called_once()
     assert "foo" not in " ".join(str(call) for call in console.print.call_args_list)
     assert "foo" not in caplog.text.lower()
 
-    on_change.reset_mock()
+    idle_change.reset_mock()
     _update(manager, {"idle_channels": ["FOO"], "claim_channel_points": True})
     assert stored.claim_channel_points is True
     on_change.assert_not_called()
+    idle_change.assert_not_called()
+
+
+def test_gui_manager_wires_idle_list_changes_to_the_client():
+    import inspect
+
+    from src.web import gui_manager
+
+    assert "on_idle_channels_change=lambda: self._twitch.idle_channels_changed()" in inspect.getsource(gui_manager)
 
 
 def test_claim_channel_points_requires_strict_bool():

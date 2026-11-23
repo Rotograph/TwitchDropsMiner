@@ -312,7 +312,7 @@ lang/                # Translation JSON files (20 languages)
 
 **src/websocket/pool.py** - WebSocket management:
 
-- Sharded connections (up to 50 topics per socket, max 199 channels)
+- Sharded connections (up to 50 topics per socket, max 198 channels)
 - Topics: User.Drops, User.Notifications, Channel.StreamState, Channel.StreamUpdate
 - Automatic reconnection with exponential backoff
 - Message routing to registered callbacks
@@ -927,7 +927,7 @@ their own 5 s timeout); they have no persisted hashes.
 4. More wanted campaigns progressable on the channel, at equal priority and ACL status
    (`ChannelService.get_selection_priority()`, also used by `should_switch()`)
 5. Viewer count (descending)
-6. Maximum 199 channels tracked simultaneously
+6. Maximum 198 channels tracked simultaneously
 
 ### Maintenance Task
 

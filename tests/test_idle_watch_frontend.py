@@ -84,7 +84,8 @@ assert.equal(error().textContent, 'Idle save failed');
 """)
 
 
-@pytest.mark.parametrize("value", ["bad-name", "", "a" * 26, "alpha", "UPPER-case"])
+@pytest.mark.parametrize("value", ["bad-name", "", "a" * 26, "alpha", "UPPER-case",
+                                   "Kelvin", " foo", "café"])
 def test_add_rejects_invalid_login_client_side(value):
     run_idle(f"""
 let sent = 0;
