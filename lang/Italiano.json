@@ -4,6 +4,7 @@
     "status": {
         "terminated": "\nApplicazione Terminata.\nChiudi la finestra per uscire dall'applicazione.",
         "watching": "Guardando: {channel}",
+        "idle_watching": "Idle watching {channel}",
         "mining_resumed": "Raccolta ripresa",
         "goes_online": "{channel} è ONLINE, cambiando...",
         "goes_offline": "{channel} è OFFLINE, cambiando...",

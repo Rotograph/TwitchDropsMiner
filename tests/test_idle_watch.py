@@ -1,13 +1,19 @@
 """Idle watch: pick logic for streak visits and points, lookup and tracking of listed channels."""
 
+import asyncio
+import inspect
 import logging
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.config import MAX_CHANNELS, WebsocketTopic
+from src.config import MAX_CHANNELS, State, WebsocketTopic
+from src.core.client import Twitch
+from src.services import idle_watch as idle_mod
 from src.services.idle_watch import IDLE_VISIT_SECONDS, IdleWatchService
+from src.services.message_handlers import MessageHandlerService
 
 
 def fake(cid, broadcast, *, online=True, banned=False, login=None):
@@ -163,3 +169,202 @@ async def test_banned_new_channel_is_not_added_and_gets_no_topics():
         WebsocketTopic.as_str("Channel", "StreamState", 1),
         WebsocketTopic.as_str("Channel", "StreamUpdate", 1),
     }
+
+
+# --- loop and client wiring ---
+
+
+def loop_service(live, *, mining=True, idle=("c1",)):
+    svc, tw = service(idle=idle)
+    tw.is_mining_time = MagicMock(side_effect=lambda: mining() if callable(mining) else mining)
+    tw._auth_state = SimpleNamespace(_logged_in=SimpleNamespace(is_set=lambda: True))
+    tw.watching_channel = SimpleNamespace(
+        get_with_default=lambda d: tw._watching or d, set=lambda c: setattr(tw, "_watching", c),
+    )
+    tw._watching = None
+    tw.watch = MagicMock(side_effect=lambda c, update_status=True: setattr(tw, "_watching", c))
+    tw.stop_watching = MagicMock()
+    tw.gui.status = MagicMock()
+    svc.track = AsyncMock(return_value=live)
+    svc.live_channels = lambda: live
+    return svc, tw
+
+
+@pytest.mark.asyncio
+async def test_idle_stops_outside_mining_time():
+    svc, tw = loop_service([fake(1, 10)], mining=False)
+    svc.enter()
+    await asyncio.wait_for(svc._task, 1)
+    tw.stop_watching.assert_called_once()
+    tw.watch.assert_not_called()
+    assert not svc.active
+
+
+@pytest.mark.asyncio
+async def test_loop_watches_pick_with_idle_status(caplog, monkeypatch):
+    monkeypatch.setattr(idle_mod, "IDLE_TICK_SECONDS", 0.01)
+    monkeypatch.setattr(idle_mod, "IDLE_VISIT_SECONDS", 0.05)
+    a, b = fake(1, 10, login="c1"), fake(2, 20, login="c2")
+    a.name, b.name = "A", "B"
+    svc, tw = loop_service([a, b], idle=("c1", "c2"))
+    with caplog.at_level(logging.INFO, logger="TwitchDrops"):
+        svc.enter()
+        svc.enter()  # second call must not start a second task
+        await asyncio.sleep(0.03)
+        assert tw.watch.call_args_list[0].args == (a,)
+        assert tw.watch.call_args_list[0].kwargs == {"update_status": False}
+        assert svc.active
+        await asyncio.sleep(0.2)
+        svc.stop()
+    assert [c.args[0] for c in tw.watch.call_args_list][:2] == [a, b]
+    # no re-watch while the pick is unchanged
+    assert len(tw.watch.call_args_list) <= 3
+    assert any("Idle watching A" in c.args[0] for c in tw.gui.status.update.call_args_list)
+    text = caplog.text
+    assert text.count("Idle watching started") == 1
+    assert "Idle visit started" in text and "Idle visit ended" in text
+    assert "Idle watching switched" in text
+    assert not svc.active
+
+
+@pytest.mark.asyncio
+async def test_track_failure_is_logged_and_retried(caplog, monkeypatch):
+    monkeypatch.setattr(idle_mod, "IDLE_TICK_SECONDS", 0.01)
+    a = fake(1, 10)
+    a.name = "A"
+    svc, tw = loop_service([a])
+    svc.track = AsyncMock(side_effect=[TimeoutError("secret body"), [a]])
+    with caplog.at_level(logging.INFO, logger="TwitchDrops"):
+        svc.enter()
+        await asyncio.sleep(0.1)
+        svc.stop()
+    assert svc.track.await_count >= 2
+    tw.watch.assert_called()
+    assert "secret body" not in caplog.text
+    assert "Idle channel lookup failed" in caplog.text
+
+
+def test_stop_keeps_visit_state():
+    svc, _ = service()
+    svc.pick([fake(1, 10)], 0)
+    svc.stop()
+    assert svc.visit is not None
+
+
+def client_stub(*, flag, mining=True, logged_in=True, idle=("c1",)):
+    client = object.__new__(Twitch)
+    client._state = State.IDLE
+    client._state_change = MagicMock()
+    client._idle_watch_allowed = flag
+    client._idle_watch = MagicMock()
+    client._idle_watch.allowed.return_value = mining and logged_in and bool(idle)
+    client.stop_watching = MagicMock()
+    return client
+
+
+@pytest.mark.parametrize("flag,ok", [(True, True), (False, False)])
+def test_idle_branch_enters_idle_watch_only_when_allowed(flag, ok):
+    client = client_stub(flag=flag)
+    client._idle_watch_step()
+    assert client._idle_watch.enter.called is ok
+    assert client.stop_watching.called is (not ok)
+
+
+@pytest.mark.parametrize("kw", [{"mining": False}, {"logged_in": False}, {"idle": ()}])
+def test_idle_branch_stops_when_a_condition_fails(kw):
+    client = client_stub(flag=True, **kw)
+    client._idle_watch_step()
+    client._idle_watch.enter.assert_not_called()
+    client.stop_watching.assert_called_once()
+
+
+def test_leaving_idle_stops_the_loop():
+    client = client_stub(flag=True)
+    client.change_state(State.INVENTORY_FETCH)
+    client._idle_watch.stop.assert_called_once()
+    assert client._idle_watch_allowed is False
+    client.change_state(State.IDLE, idle_watch=True)
+    assert client._idle_watch_allowed is True
+    client.change_state(State.IDLE)
+    assert client._idle_watch_allowed is False
+
+
+def test_nothing_to_mine_entries_allow_idle_watch():
+    src = inspect.getsource(Twitch._run)
+    calls = re.findall(r"self\.change_state\(State\.IDLE(?:, idle_watch=True)?\)", src)
+    flagged = [c for c in calls if "idle_watch" in c]
+    assert len(flagged) == 2
+    # no-games cleanup branch and the no-channel switch branch carry the flag
+    assert re.search(r'collapse_key="status.no_campaign",\s+\)\s+self\.change_state\(State\.IDLE, idle_watch=True\)', src)
+    assert re.search(r'_t\["status"\]\["no_channel"\]\)\s+self\.change_state\(State\.IDLE, idle_watch=True\)', src.replace("_.t", "_t"))
+    assert len(calls) == 3  # the mining-hours close stays unflagged; the schedule loop is another method
+    assert "self._state = State.IDLE" in inspect.getsource(Twitch)
+
+
+def test_idle_channel_online_event_pokes():
+    tw = MagicMock()
+    tw.settings.idle_channels = ["c1"]
+    tw._idle_watch.active = True
+    tw.watching_channel.get_with_default.return_value = None
+    tw.can_watch.return_value = False
+    handler = MessageHandlerService(tw)
+    listed = SimpleNamespace(login="c1", name="C1", display=MagicMock())
+    other = SimpleNamespace(login="zz", name="ZZ", display=MagicMock())
+    handler.on_channel_update(listed, None, object())
+    tw._idle_watch.poke.assert_called_once()
+    handler.on_channel_update(other, None, object())
+    tw._idle_watch.poke.assert_called_once()
+    tw._idle_watch.active = False
+    handler.on_channel_update(listed, None, object())
+    tw._idle_watch.poke.assert_called_once()
+
+
+def test_idle_entry_without_flag_stops_a_running_loop():
+    client = client_stub(flag=True)
+    client.change_state(State.IDLE)
+    client._idle_watch.stop.assert_called_once()
+    client._idle_watch.stop.reset_mock()
+    client._idle_watch_allowed = False
+    client._idle_watch_step()
+    client._idle_watch.stop.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_stale_channel_object_with_same_id_is_replaced(monkeypatch):
+    monkeypatch.setattr(idle_mod, "IDLE_TICK_SECONDS", 0.01)
+    old, new = fake(1, 10), fake(1, 10)
+    old.name = new.name = "A"
+    svc, tw = loop_service([new])
+    tw._watching = old
+    svc.enter()
+    await asyncio.sleep(0.03)
+    svc.stop()
+    assert tw.watch.call_args_list[0].args == (new,)
+    tw.gui.status.update.assert_called()
+    assert tw.watch.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_unknown_login_is_looked_up_once_until_the_list_changes(caplog):
+    answer = {"data": {"user": None}}
+    gql = AsyncMock(return_value=[answer])
+    svc, tw = service(idle=["typo"], gql=gql)
+    with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
+        await svc.track()
+        await svc.track()
+    assert gql.await_count == 1
+    assert caplog.text.count("skipped") == 1
+    tw.settings.idle_channels = ["typo", "other"]
+    gql.return_value = [answer, answer]
+    await svc.track()
+    assert gql.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_whole_request_failure_is_not_a_skip():
+    gql = AsyncMock(side_effect=[TimeoutError(), [{"data": {"user": None}}]])
+    svc, _ = service(idle=["a"], gql=gql)
+    with pytest.raises(TimeoutError):
+        await svc.track()
+    await svc.track()
+    assert gql.await_count == 2

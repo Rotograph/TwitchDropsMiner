@@ -4,6 +4,7 @@
     "status": {
         "terminated": "\nProgram Afsluttet.\nLuk vinduet for at afslutte programmet.",
         "watching": "Ser på: {channel}",
+        "idle_watching": "Idle watching {channel}",
         "mining_resumed": "Mining genoptaget",
         "goes_online": "{channel} går ONLINE, skifter...",
         "goes_offline": "{channel} går OFFLINE, skifter...",

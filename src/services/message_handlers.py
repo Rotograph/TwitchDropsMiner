@@ -147,6 +147,8 @@ class MessageHandlerService:
                 self._twitch.watch(channel)
             else:
                 logger.info(f"{channel.name} goes ONLINE")
+            if self._twitch._idle_watch.active and channel.login in self._twitch.settings.idle_channels:
+                self._twitch._idle_watch.poke()
 
         # Channel going from ONLINE to OFFLINE
         elif stream_before is not None and stream_after is None:

@@ -4,6 +4,7 @@
     "status": {
         "terminated": "\nAplicația a fost oprită.\nVă rugăm să închideți aplicația.",
         "watching": "Se vizionează : {channel}",
+        "idle_watching": "Idle watching {channel}",
         "mining_resumed": "Colectarea a fost reluată",
         "goes_online": "{channel} intră ONLINE, se schimbă...",
         "goes_offline": "{channel} intră OFFLINE, se schimbă...",

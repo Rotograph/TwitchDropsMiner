@@ -4,6 +4,7 @@
     "status": {
         "terminated": "\n应用程序已终止，请关闭窗口以退出应用程序.",
         "watching": "正在观看: {channel}",
+        "idle_watching": "Idle watching {channel}",
         "mining_resumed": "已恢复挖矿",
         "goes_online": "{channel} 该频道已上线, 正在切换...",
         "goes_offline": "{channel} 该频道已离线, 正在切换...",

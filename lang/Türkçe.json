@@ -4,6 +4,7 @@
     "status": {
         "terminated": "\nUygulama durduruldu.\nUygulamadan çıkmak için pencereyi kapatın",
         "watching": "{channel} izleniyor",
+        "idle_watching": "Idle watching {channel}",
         "mining_resumed": "Ödül toplama sürdürüldü",
         "goes_online": "{channel} ÇEVRİMİÇİ oldu, geçiş yapın...",
         "goes_offline": "{channel} ÇEVRİMDIŞI duruma geçti, geçiş yapın...",

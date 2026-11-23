@@ -4,6 +4,7 @@
     "status": {
         "terminated": "\nЗастосунок зупинено.\nЗакрийте вікно для виходу з програми.",
         "watching": "Переглядає: {channel}",
+        "idle_watching": "Idle watching {channel}",
         "mining_resumed": "Збір нагород відновлено",
         "goes_online": "{channel} онлайн, зміна...",
         "goes_offline": "{channel} офлайн, зміна...",

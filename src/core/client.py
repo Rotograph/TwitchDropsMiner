@@ -39,6 +39,7 @@ from src.models.channel import Channel
 from src.models.reward_campaign import RewardCampaign
 from src.services.channel_service import ChannelService
 from src.services.game_order import TemporaryGameOrder
+from src.services.idle_watch import IdleWatchService
 from src.services.inventory_service import InventoryService
 from src.services.maintenance import MaintenanceService
 from src.services.message_handlers import MessageHandlerService
@@ -132,6 +133,8 @@ class Twitch:
         self._message_handler_service: MessageHandlerService = MessageHandlerService(self)
         self._inventory_service: InventoryService = InventoryService(self)
         self._watch_service: WatchService = WatchService(self)
+        self._idle_watch: IdleWatchService = IdleWatchService(self)
+        self._idle_watch_allowed: bool = False
         self._stream_selector: StreamSelector = StreamSelector()
         # Drop history
         self.drop_history: DropHistory = DropHistory(DATA_DIR)
@@ -239,6 +242,8 @@ class Twitch:
             self._inventory_loaded = False
             if self._state is not State.EXIT:
                 self._state = State.IDLE
+            self._idle_watch_allowed = False
+            self._idle_watch.stop()
             self._changing_auth = False
             self._resume_mining.set()
 
@@ -314,11 +319,18 @@ class Twitch:
         """Wait until the user is logged in."""
         return self._auth_state._logged_in.wait()
 
-    def change_state(self, state: State) -> None:
-        """Change the current state of the miner."""
+    def change_state(self, state: State, *, idle_watch: bool = False) -> None:
+        """Change the current state of the miner.
+
+        idle_watch is only honoured for IDLE: it marks "nothing can be mined", so the
+        idle service may watch the owner's listed channels.
+        """
         if self._state is not State.EXIT:
             # prevent state changing once we switch to exit state
             self._state = state
+            self._idle_watch_allowed = idle_watch and state is State.IDLE
+            if not self._idle_watch_allowed:
+                self._idle_watch.stop()
         self._state_change.set()
 
     def request_games_update(self) -> bool:
@@ -615,7 +627,7 @@ class Twitch:
                     self.gui.status.update(_.t["gui"]["status"]["idle"])
                 else:
                     self.gui.status.update(self._closed_status())
-                self.stop_watching()
+                self._idle_watch_step()
                 # clear the flag and wait until it's set again
                 self._state_change.clear()
             elif self._state is State.INVENTORY_FETCH:
@@ -741,7 +753,7 @@ class Twitch:
                         _.t["status"]["no_campaign"],
                         collapse_key="status.no_campaign",
                     )
-                    self.change_state(State.IDLE)
+                    self.change_state(State.IDLE, idle_watch=True)
             elif self._state is State.CHANNELS_FETCH:
                 self.gui.status.update(_.t["gui"]["status"]["gathering"])
                 # start with all current channels, keep them in memory for smooth update
@@ -956,7 +968,7 @@ class Twitch:
                 else:
                     # No channels available to watch
                     self.print(_.t["status"]["no_channel"])
-                    self.change_state(State.IDLE)
+                    self.change_state(State.IDLE, idle_watch=True)
             elif self._state is State.EXIT:
                 self.gui.status.update(_.t["gui"]["status"]["exiting"])
                 # we've been requested to exit the application
@@ -967,6 +979,13 @@ class Twitch:
             self._activate_pending_inventory_refresh()
             self._activate_pending_games_update()
             await self._state_change.wait()
+
+    def _idle_watch_step(self) -> None:
+        if self._idle_watch_allowed and self._idle_watch.allowed():
+            self._idle_watch.enter()
+        else:
+            self._idle_watch.stop()
+            self.stop_watching()
 
     def can_watch(self, channel: Channel) -> bool:
         """Delegate to WatchService."""
