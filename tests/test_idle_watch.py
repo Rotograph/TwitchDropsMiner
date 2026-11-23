@@ -77,7 +77,7 @@ def test_visit_ends_when_channel_offline_or_new_broadcast():
 def test_points_watch_on_highest_live_after_visits():
     svc, _ = service()
     a, b = fake(1, 10), fake(2, 20)
-    svc.visited = {10, 20}
+    svc.visited = {10: 1, 20: 2}
     assert svc.pick([a, b], 0) is a
     assert svc.pick([], 1) is None
 
@@ -89,12 +89,14 @@ def test_removed_channel_is_dropped():
     assert svc.pick([b], 1) is b
 
 
-def test_visited_is_pruned():
-    svc, _ = service()
-    a = fake(1, 10)
-    svc.visited = {10, 20, 99}
-    svc.pick([a], 0)
-    assert svc.visited == {10}
+def test_visited_is_pruned_only_for_a_new_broadcast_or_an_unlisted_channel():
+    # channel 1 is live with broadcast 11 (new), 2 is tracked but no longer listed,
+    # 3 is listed but offline this tick, 4 is untracked (after a cleanup)
+    tracked = {1: fake(1, 11, login="a"), 2: fake(2, 20, login="b"), 3: fake(3, 30, login="c")}
+    svc, _ = service(tracked, idle=["a", "c", "d"])
+    svc.visited = {10: 1, 20: 2, 30: 3, 40: 4}
+    svc.pick([tracked[1]], 0)
+    assert svc.visited == {30: 3, 40: 4}
 
 
 def user(uid, login, live=True):
@@ -262,6 +264,8 @@ def client_stub(*, flag, mining=True, logged_in=True, idle=("c1",)):
     client._idle_watch = MagicMock()
     client._idle_watch.allowed.return_value = mining and logged_in and bool(idle)
     client.stop_watching = MagicMock()
+    client.watching_channel = SimpleNamespace(get_with_default=lambda d: d)
+    client.can_watch = MagicMock(return_value=False)
     return client
 
 
@@ -591,7 +595,7 @@ async def test_authentication_change_drains_idle_task_and_forgets_account_state(
     task = svc._task
     await entered.wait()
     svc.balances[1] = 5
-    svc.visited.add(10)
+    svc.visited[10] = 1
     svc.visit = idle_mod.Visit(1, 10, 0.0)
     svc._skipped.add("x")
     svc._claimed.add("c")
@@ -600,7 +604,7 @@ async def test_authentication_change_drains_idle_task_and_forgets_account_state(
         assert cleaned.is_set() and task.done()
     assert not svc.active
     assert (svc.balances, svc.visited, svc.visit, svc._skipped, svc._claimed, svc._seen_list) == (
-        {}, set(), None, set(), set(), None,
+        {}, {}, None, set(), set(), None,
     )
 
 
@@ -632,3 +636,279 @@ async def test_banned_logins_warn_once(caplog):
     assert sorted(r.getMessage() for r in banned) == [
         "Idle channel b skipped: banned", "Idle channel c skipped: banned",
     ]
+
+
+# --- second final review fixes (FR) ---
+
+
+def run_service(channels=None, idle=(), gql=None):
+    """A real track()/pick() loop on the fake client, one tick per wait (IDLE_TICK_SECONDS stays 30)."""
+    svc, tw = service(channels, idle=idle, gql=gql)
+    tw.is_mining_time = MagicMock(return_value=True)
+    tw._auth_state = SimpleNamespace(_logged_in=SimpleNamespace(is_set=lambda: True))
+    tw._watching = None
+    tw.watching_channel = SimpleNamespace(get_with_default=lambda d: tw._watching or d)
+    tw.watch = MagicMock(side_effect=lambda c, update_status=True: setattr(tw, "_watching", c))
+    tw.stop_watching = MagicMock()
+    tw.can_watch = MagicMock(return_value=False)
+    tw.change_state = MagicMock()
+    tw.gui.status = MagicMock()
+    tw.gui.clear_drop = MagicMock()
+    return svc, tw
+
+
+async def idle_entry(svc, ticks=1):
+    svc.enter()
+    await asyncio.sleep(0.02)
+    for _ in range(ticks - 1):
+        svc.poke()
+        await asyncio.sleep(0.02)
+    task = svc.stop()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_over_cap_login_warns_once_by_count_and_is_retried_on_the_next_idle_entry(caplog):
+    # FR1: CHANNEL_SWITCH "no channel" keeps the drop channels tracked, so the cap can be full
+    filler = {1000 + i: fake(1000 + i, 1) for i in range(MAX_CHANNELS)}
+    gql = AsyncMock(return_value=[user(1, "secretlogin", live=False)])
+    svc, tw = run_service(filler, idle=["secretlogin"], gql=gql)
+    with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
+        await idle_entry(svc, ticks=2)
+    assert gql.await_count == 1  # not re-requested on every tick of the run
+    assert 1 not in tw.channels
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == ["1 idle channels skipped: tracked channel limit reached"]
+    tw.channels.pop(1000)
+    await idle_entry(svc)
+    assert gql.await_count == 2
+    assert 1 in tw.channels
+
+
+@pytest.mark.asyncio
+async def test_lifted_ban_is_retried_on_the_next_idle_entry():
+    gql = AsyncMock(return_value=[user(2, "b", live=False)])
+    svc, tw = run_service(idle=["b"], gql=gql)
+
+    async def ban_then_lift(chans):
+        return [] if tw._channel_service.filter_banned_channels.await_count == 1 else list(chans)
+
+    tw._channel_service.filter_banned_channels = AsyncMock(side_effect=ban_then_lift)
+    await idle_entry(svc, ticks=2)
+    assert gql.await_count == 1
+    assert 2 not in tw.channels
+    await idle_entry(svc)
+    assert gql.await_count == 2
+    assert 2 in tw.channels
+
+
+@pytest.mark.asyncio
+async def test_visit_clock_pauses_while_the_loop_is_stopped(monkeypatch):
+    # FR2a: 60 s of a visit, then an hour of drops, must leave 360 s of the visit
+    now = [1000.0]
+    monkeypatch.setattr(idle_mod, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    a, b = fake(1, 10, login="c1"), fake(2, 20, login="c2")
+    a.name, b.name = "A", "B"
+    svc, tw = loop_service([a, b], idle=("c1", "c2"))
+    svc.enter()
+    await asyncio.sleep(0.02)
+    assert (svc.visit.channel_id, svc.visit.started) == (1, 1000.0)
+    now[0] = 1060.0
+    task = svc.stop()
+    await asyncio.gather(task, return_exceptions=True)
+    now[0] = 1060.0 + 1800
+    svc.enter()
+    svc.stop()  # cancelled before its first step: must not move the stamp
+    now[0] = 1060.0 + 3600
+    svc.enter()
+    await asyncio.sleep(0.02)
+    svc.stop()
+    assert svc.visit is not None and svc.visit.channel_id == 1
+    assert now[0] - svc.visit.started == 60.0
+    assert tw._watching is a
+
+
+def test_visits_survive_a_tick_without_live_channels():
+    # FR2b: a failed track() after a full cleanup leaves no live channel for a tick
+    svc, _ = service()
+    a, b = fake(1, 10), fake(2, 20)
+    svc.visited = {10: 1, 20: 2}
+    assert svc.pick([], 0) is None
+    assert svc.pick([a, b], 1) is a
+    assert svc.visit is None  # points watch, not a fresh round of visits
+
+
+def test_channel_missing_for_one_tick_is_not_visited_twice():
+    # FR2c
+    svc, _ = service()
+    a, b = fake(1, 10), fake(2, 20)
+    svc.pick([a, b], 0)
+    assert svc.pick([b], 5) is b  # a missing: its visit ends
+    svc.visit.done = True
+    assert svc.pick([a, b], 6) is a
+    assert svc.visit is None  # same broadcast of a: no second visit
+
+
+def answers_by_login(table):
+    async def gql(ops):
+        logins = [op["variables"]["channel"] for op in ops]
+        for login in logins:
+            if isinstance(table[login], Exception):
+                raise table[login]
+        return [table[login] for login in logins]
+    return AsyncMock(side_effect=gql)
+
+
+@pytest.mark.asyncio
+async def test_hard_gql_error_in_a_batch_skips_only_the_failing_login(caplog):
+    # FR3: gql_request raises GQLException for the whole batch on an unrecognised error
+    from src.exceptions import GQLException
+
+    gql = answers_by_login({
+        "good": user(1, "good", live=False), "bad": GQLException("secret body"),
+        "other": user(3, "other", live=False),
+    })
+    svc, tw = service(idle=["good", "bad", "other"], gql=gql)
+    with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
+        tracked = await svc.track()
+        await svc.track()
+    assert [c.login for c in tracked] == ["good", "other"]
+    assert set(tw.channels) == {1, 3}
+    assert gql.await_count == 4  # the batch, then one request per login; nothing next tick
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == ["Idle channel bad skipped: lookup failed or unknown"]
+    assert "secret body" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_single_login_gql_error_still_propagates():
+    # only a batch is narrowed; a lone login failing is a whole-request failure, retried next tick
+    from src.exceptions import GQLException
+
+    svc, _ = service(idle=["bad"], gql=answers_by_login({"bad": GQLException("x")}))
+    with pytest.raises(GQLException):
+        await svc.track()
+    assert svc._skipped == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_user", [
+    {"id": None, "login": "bad"}, {"login": "bad"}, {"id": "12a", "login": "bad"},
+    {"id": "", "login": "bad"}, {"id": True, "login": "bad"}, {"id": "²", "login": "bad"},
+    {"id": [1], "login": "bad"}, "bad",
+])
+async def test_user_without_a_usable_id_is_skipped(bad_user, caplog):
+    gql = AsyncMock(return_value=[{"data": {"user": bad_user}}, user(2, "ok", live=False)])
+    svc, tw = service(idle=["bad", "ok"], gql=gql)
+    with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
+        tracked = await svc.track()
+        await svc.track()
+    assert [c.login for c in tracked] == ["ok"]
+    assert set(tw.channels) == {2}
+    assert gql.await_count == 1
+    assert caplog.text.count("Idle channel bad skipped") == 1
+
+
+@pytest.mark.asyncio
+async def test_numeric_user_id_is_accepted():
+    gql = AsyncMock(return_value=[{"data": {"user": {"id": 5, "login": "n", "stream": None}}}])
+    svc, _ = service(idle=["n"], gql=gql)
+    assert [c.id for c in await svc.track()] == [5]
+
+
+@pytest.mark.asyncio
+async def test_visit_start_is_logged_once_across_loop_restarts(caplog):
+    # FR7
+    a = fake(1, 10, login="c1")
+    a.name = "A"
+    svc, _ = loop_service([a])
+    with caplog.at_level(logging.INFO, logger="TwitchDrops"):
+        await idle_entry(svc)
+        await idle_entry(svc)
+    assert caplog.text.count("Idle visit started") == 1
+    assert caplog.text.count("Idle watching started") == 2
+
+
+@pytest.mark.asyncio
+async def test_rewatch_after_nothing_live_is_not_logged_as_a_switch(caplog, monkeypatch):
+    monkeypatch.setattr(idle_mod, "IDLE_TICK_SECONDS", 5)
+    a = fake(1, 10, login="c1")
+    a.name = "A"
+    live = [a]
+    svc, tw = loop_service(live)
+    tw.stop_watching.side_effect = lambda: setattr(tw, "_watching", None)
+    with caplog.at_level(logging.INFO, logger="TwitchDrops"):
+        svc.enter()
+        await asyncio.sleep(0.02)
+        live.clear()
+        svc.poke()
+        await asyncio.sleep(0.02)
+        assert svc.watched is None
+        live.append(a)
+        svc.poke()
+        await asyncio.sleep(0.02)
+        svc.stop()
+    assert tw.watch.call_count == 2
+    assert "Idle watching switched" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_exit_request_ends_the_loop_without_an_error_log(caplog):
+    from src.exceptions import ExitRequest
+
+    svc, _ = loop_service([])
+    svc.track = AsyncMock(side_effect=ExitRequest())
+    with caplog.at_level(logging.INFO, logger="TwitchDrops"):
+        svc.enter()
+        await asyncio.wait_for(svc._task, 1)
+    assert svc.track.await_count == 1
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+@pytest.mark.asyncio
+async def test_points_request_reraises_exit_request():
+    from src.exceptions import ExitRequest
+
+    svc, _ = service(gql=AsyncMock(side_effect=ExitRequest()))
+    with pytest.raises(ExitRequest):
+        await svc._gql(idle_mod.GQL_OPERATIONS["ChannelPointsContext"].with_variables({"channelLogin": "a"}))
+
+
+def test_idle_watch_logs_keep_their_module_name_in_diagnostics():
+    from src.diagnostics import Diagnostics
+
+    assert idle_mod.__name__.rsplit(".", 1)[-1] in Diagnostics.LOG_MODULES
+
+
+def stopping_client(*, can_watch, active=True):
+    client = client_stub(flag=True)
+    idle = SimpleNamespace(id=1, login="c1")
+    client.watching_channel = SimpleNamespace(get_with_default=lambda d: idle)
+    client.can_watch = MagicMock(return_value=can_watch)
+    client._idle_watch.active = active
+    return client
+
+
+@pytest.mark.parametrize("state", [State.INVENTORY_FETCH, State.CHANNEL_SWITCH, State.IDLE])
+def test_leaving_idle_watching_releases_the_idle_channel(state):
+    # FR8: otherwise refresh_watched_channel carries it into the CHANNELS_FETCH candidates
+    client = stopping_client(can_watch=False)
+    client.change_state(state)
+    client._idle_watch.stop.assert_called_once()
+    client.stop_watching.assert_called_once()
+
+
+def test_leaving_idle_watching_keeps_a_channel_drops_can_use():
+    # the loop's own handover (RT1) leaves a drop channel watched for CHANNEL_SWITCH
+    client = stopping_client(can_watch=True)
+    client.change_state(State.CHANNEL_SWITCH)
+    client.stop_watching.assert_not_called()
+
+
+def test_state_change_without_a_running_idle_loop_keeps_the_watch():
+    client = stopping_client(can_watch=False, active=False)
+    client.change_state(State.CHANNEL_SWITCH)
+    client.stop_watching.assert_not_called()
+    client = stopping_client(can_watch=False)
+    client.change_state(State.IDLE, idle_watch=True)
+    client.stop_watching.assert_not_called()

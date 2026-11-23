@@ -333,7 +333,16 @@ class Twitch:
             self._state = state
             self._idle_watch_allowed = idle_watch and state is State.IDLE
             if not self._idle_watch_allowed:
+                was_idle_watching = self._idle_watch.active
                 self._idle_watch.stop()
+                # The stopped loop leaves its idle channel watched; CHANNELS_FETCH would carry it
+                # as a drop candidate. A channel drops can use stays (the loop's own handover).
+                if (
+                    was_idle_watching
+                    and (watching := self.watching_channel.get_with_default(None)) is not None
+                    and not self.can_watch(watching)
+                ):
+                    self.stop_watching()
         self._state_change.set()
 
     def idle_channels_changed(self) -> None:

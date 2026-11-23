@@ -19,13 +19,15 @@ from typing import TYPE_CHECKING
 import aiohttp
 
 from src.config import GQL_OPERATIONS, MAX_CHANNELS, State, WebsocketTopic
-from src.exceptions import MinerException
+from src.exceptions import ExitRequest, GQLException, MinerException
 from src.i18n import _
 from src.models.channel import Channel
 from src.utils import chunk, task_wrapper
 
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from src.config import GQLOperation, GQLQuery, GQLRawQuery, JsonType
     from src.core.client import Twitch
 
@@ -49,11 +51,14 @@ class Visit:
 class IdleWatchService:
     def __init__(self, twitch: Twitch) -> None:
         self._twitch = twitch
-        self.visited: set[int] = set()
+        # broadcast id -> channel id of finished visits
+        self.visited: dict[int, int] = {}
         self.visit: Visit | None = None
+        # when the loop last stopped, so a visit does not count the time spent mining drops
+        self._paused_at: float | None = None
         self._task: asyncio.Task[None] | None = None
         self._wake = asyncio.Event()
-        # logins track() gave up on (unknown, banned, over the cap) until the list changes
+        # logins track() gave up on (unknown, banned, over the cap) for this idle run
         self._skipped: set[str] = set()
         self._seen_list: list[str] | None = None
         self.balances: dict[int, int] = {}
@@ -85,14 +90,22 @@ class IdleWatchService:
     def stop(self) -> asyncio.Task[None] | None:
         """Cancel the loop and return its task, so a caller can await the cancellation."""
         task, self._task = self._task, None
-        if task is not None:
+        if task is not None and not task.done():
+            self._pause()
             task.cancel()
         return task
+
+    def _pause(self) -> None:
+        # the first stop wins: later stop() calls while already down must not shrink the gap
+        if self._paused_at is None:
+            self._paused_at = time.monotonic()
 
     def reset(self) -> None:
         """Forget the previous account's visits, balances, claims and lookups."""
         self.visited.clear()
         self.visit = None
+        self._last_visit = None
+        self._paused_at = None
         self.balances.clear()
         self._claimed.clear()
         self._skipped.clear()
@@ -111,8 +124,12 @@ class IdleWatchService:
         logger.info("Idle watching started")
         # the last drop's progress panel does not belong to an idle channel
         tw.gui.clear_drop()
-        self._last_visit = None
         self.watched = None
+        # each idle entry retries the logins the previous run gave up on
+        self._skipped.clear()
+        if self._paused_at is not None and self.visit is not None:
+            self.visit.started += time.monotonic() - self._paused_at
+        self._paused_at = None
         while True:
             # cleared before the awaits, so a poke during the tick runs one more tick
             self._wake.clear()
@@ -123,11 +140,15 @@ class IdleWatchService:
                 tw.change_state(State.CHANNEL_SWITCH)
                 return
             if not self.allowed():
+                self._pause()
                 tw.stop_watching()
                 logger.info("Idle watching stopped")
                 return
             try:
                 await self._tick()
+            except ExitRequest:
+                # shutting down: end the loop quietly, like task_wrapper does for other tasks
+                return
             except Exception:
                 # one bad tick must not end idle watching; CancelledError still propagates
                 logger.exception("Idle watching step failed, retrying")
@@ -138,6 +159,8 @@ class IdleWatchService:
         tw = self._twitch
         try:
             await self.track()
+        except ExitRequest:
+            raise
         except (MinerException, aiohttp.ClientError, TimeoutError) as exc:
             # no response body: the exception type is enough to diagnose
             logger.warning("Idle channel lookup failed (%s), retrying", type(exc).__name__)
@@ -149,6 +172,7 @@ class IdleWatchService:
                 logger.info("Idle visit started: %s", channel.name if channel else "?")
             self._last_visit = self.visit
         if channel is None:
+            self.watched = None
             tw.stop_watching()
         elif channel is not tw.watching_channel.get_with_default(None) or channel is not self.watched:
             if self.watched is not None:
@@ -180,6 +204,8 @@ class IdleWatchService:
         """Send op; failures are logged as one warning without the response body."""
         try:
             response = await self._twitch.gql_request(op)
+        except ExitRequest:
+            raise
         except (MinerException, aiohttp.ClientError, TimeoutError) as exc:
             logger.warning("Channel points request %s failed (%s)", op["operationName"], type(exc).__name__)
             return None
@@ -190,7 +216,8 @@ class IdleWatchService:
 
     async def claim(self, channel: Channel, claim_id: str) -> None:
         if (
-            not self._twitch.settings.claim_channel_points
+            not claim_id
+            or not self._twitch.settings.claim_channel_points
             or claim_id in self._claimed
             or claim_id in self._claiming
         ):
@@ -260,9 +287,10 @@ class IdleWatchService:
             await self._points_earned(data)
         elif msg_type == "claim-available":
             claim = data.get("claim")
-            if not isinstance(claim, dict) or not isinstance(claim.get("id"), str):
+            if not isinstance(claim, dict) or not isinstance(claim.get("id"), str) or not claim["id"]:
                 return
-            if (channel := self._idle_watched(claim.get("channel_id"))) is not None:
+            channel_id = self._channel_id(claim.get("channel_id"))
+            if channel_id is not None and (channel := self._idle_watched(channel_id)) is not None:
                 await self.claim(channel, claim["id"])
 
     def _log_raw(self, message: JsonType) -> None:
@@ -275,9 +303,16 @@ class IdleWatchService:
             balance.pop("balance", None)
         logger.debug("Raw points-earned message: %s", raw)
 
+    @staticmethod
+    def _channel_id(value: object) -> str | None:
+        """A message's channel id as a digit string; Twitch may send it as a number."""
+        if isinstance(value, int) and not isinstance(value, bool):
+            value = str(value)
+        return value if isinstance(value, str) and value.isascii() and value.isdigit() else None
+
     async def _points_earned(self, data: JsonType) -> None:
-        channel_id = data.get("channel_id")
-        if not self.active or not isinstance(channel_id, str) or not channel_id.isdigit():
+        channel_id = self._channel_id(data.get("channel_id"))
+        if not self.active or channel_id is None:
             return
         gain, balance = data.get("point_gain"), data.get("balance")
         reason = gain.get("reason_code") if isinstance(gain, dict) else None
@@ -314,9 +349,16 @@ class IdleWatchService:
                 and now - visit.started < IDLE_VISIT_SECONDS
             ):
                 return next(c for c in live if c.id == visit.channel_id)
-            self.visited.add(visit.broadcast_id)
+            self.visited[visit.broadcast_id] = visit.channel_id
             self.visit = None
-        self.visited &= set(ids.values())
+        # A visit is forgotten only when its channel is live with another broadcast, or is
+        # tracked but no longer listed; a channel missing for a tick (or untracked after a
+        # cleanup) keeps its visit, so it is not visited twice in one stream.
+        listed = set(self._twitch.settings.idle_channels)
+        unlisted = {c.id for c in self._twitch.channels.values() if c.login not in listed}
+        self.visited = {
+            b: cid for b, cid in self.visited.items() if cid not in unlisted and ids.get(cid, b) == b
+        }
         for channel in live:
             if ids[channel.id] not in self.visited:
                 self.visit = Visit(channel.id, ids[channel.id], now)
@@ -327,6 +369,26 @@ class IdleWatchService:
         by_login = {c.login: c for c in self._twitch.channels.values()}
         channels = (by_login.get(login) for login in self._twitch.settings.idle_channels)
         return [c for c in channels if c is not None and c.online and not c.banned]
+
+    async def _lookup(self, batch: list[str]) -> Sequence[JsonType | None]:
+        """Answers for batch, in order; a hard GQL error in a batch is narrowed to the logins that cause it."""
+        ops: list[GQLOperation | GQLQuery | GQLRawQuery] = [
+            GQL_OPERATIONS["GetStreamInfo"].with_variables({"channel": n}) for n in batch
+        ]
+        try:
+            response = await self._twitch.gql_request(ops)
+        except GQLException:
+            # gql_request raises for the whole batch when one answer has an unrecognised error
+            if len(batch) == 1:
+                raise
+            answers: list[JsonType | None] = []
+            for login in batch:
+                try:
+                    answers.extend(await self._lookup([login]))
+                except GQLException:
+                    answers.append(None)  # the caller logs the skip
+            return answers
+        return response if isinstance(response, list) else [response]
 
     async def track(self) -> list[Channel]:
         """Look up listed logins not tracked yet and add them; whole-request failures propagate."""
@@ -340,18 +402,17 @@ class IdleWatchService:
         new: list[Channel] = []
         resolved: dict[str, Channel] = {}
         for batch in chunk(missing, 20):
-            ops: list[GQLOperation | GQLQuery | GQLRawQuery] = [GQL_OPERATIONS["GetStreamInfo"].with_variables({"channel": n}) for n in batch]
-            response = await twitch.gql_request(ops)
-            answers = response if isinstance(response, list) else [response]
+            answers = await self._lookup(batch)
             # a login a short reply did not answer is skipped like an unknown one
             for login, answer in zip_longest(batch, answers[: len(batch)]):
                 data = answer.get("data") if isinstance(answer, dict) else None
                 user = data.get("user") if isinstance(data, dict) else None
-                if not user or answer.get("errors"):
+                user_id = self._channel_id(user.get("id")) if isinstance(user, dict) else None
+                if not isinstance(user, dict) or user_id is None or answer.get("errors"):  # type: ignore[union-attr]
                     logger.warning("Idle channel %s skipped: lookup failed or unknown", login)
                     self._skipped.add(login)
                     continue
-                channel_id = int(user["id"])
+                channel_id = int(user_id)
                 channel = twitch.channels.get(channel_id) or next(
                     (c for c in new if c.id == channel_id), None,
                 )
@@ -361,7 +422,11 @@ class IdleWatchService:
                         channel.external_update(user, [])
                     new.append(channel)
                 resolved[login] = channel
-        new = new[: max(MAX_CHANNELS - len(twitch.channels), 0)]
+        room = max(MAX_CHANNELS - len(twitch.channels), 0)
+        if len(new) > room:
+            # count only, no logins; they stay skipped for this idle run
+            logger.warning("%d idle channels skipped: tracked channel limit reached", len(new) - room)
+            new = new[:room]
         banned: set[int] = set()
         if new:
             allowed = await twitch._channel_service.filter_banned_channels(new)

@@ -262,7 +262,8 @@ versioned frontend controls.
 - Each live listed channel gets one visit of up to 7 minutes per stream, to count toward its watch streak.
 - After the visits, TDM watches the highest live listed channel for channel points. The order of the list is the priority.
 - **Claim channel points bonus while idle watching** (on by default) claims the channel points bonus. It claims only while idle watching, never while mining drops.
-- Streak counting is untested until it is confirmed live. Treat it as unverified.
+- Streak counting, the bonus claim (`ClaimCommunityPoints`) and the websocket points messages are untested until they are seen live. Treat them as unverified.
+- TDM tracks at most 198 channels, drop and idle channels together: the channel points topic takes one websocket slot. Idle channels over that limit are skipped with a warning and retried the next time idle watching starts.
 
 ## Pause mining
 

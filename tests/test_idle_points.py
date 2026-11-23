@@ -265,3 +265,38 @@ async def test_gql_failures_log_one_warning_without_body(caplog):
     with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
         await svc.process_points(1, claim_msg("z"))
     assert len(caplog.records) == 1 and "secret-body" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_numeric_channel_id_in_points_messages():
+    # FR6: both message types normalise the channel id the same way
+    svc, tw, _ = setup()
+    svc.visit = Visit(123, 10, 0.0)
+    await svc.process_points(1, earned("WATCH_STREAK", channel_id=123))
+    assert svc.balances == {123: 1510}
+    assert svc.visit.done
+    await svc.process_points(1, claim_msg(channel_id=123))
+    assert [o["operationName"] for o in sent(tw)] == ["ClaimCommunityPoints"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel_id", [True, 12.3, "\u00b9\u00b2\u00b3", "-123", " 123"])
+async def test_unusable_channel_id_is_ignored(channel_id):
+    svc, tw, _ = setup()
+    svc.visit = Visit(123, 10, 0.0)
+    await svc.process_points(1, earned("WATCH_STREAK", channel_id=channel_id))
+    await svc.process_points(1, claim_msg(channel_id=channel_id))
+    assert svc.balances == {}
+    assert not svc.visit.done
+    assert sent(tw) == []
+
+
+@pytest.mark.asyncio
+async def test_empty_claim_id_is_not_sent():
+    context = {"data": {"community": {"channel": {"self": {"communityPoints": {
+        "balance": 900, "availableClaim": {"id": ""},
+    }}}}}}
+    svc, tw, watched = setup(gql=AsyncMock(return_value=context))
+    await svc.process_points(1, claim_msg(claim_id=""))
+    await svc.refresh_points(watched)
+    assert [o["operationName"] for o in sent(tw)] == ["ChannelPointsContext"]

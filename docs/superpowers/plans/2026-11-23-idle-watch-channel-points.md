@@ -18,7 +18,7 @@
 - Drops always win: nothing in this plan may change channel selection, `can_watch`, `should_switch`, inventory refresh timing or `MAX_CHANNELS` handling for drop channels.
 - Idle watching and bonus claims run only when all hold: state is `State.IDLE` entered for "nothing to mine", `is_mining_time()` is true (covers pause and mining hours), the user is logged in, `idle_channels` is not empty.
 - Visit length `IDLE_VISIT_SECONDS = 420`; loop tick `IDLE_TICK_SECONDS = 30`; at most 20 idle channels; logins match `^[a-z0-9_]{1,25}$` after `strip().lower()`.
-- Streak reason code `"WATCH_STREAK"`, bonus reason code `"CLAIM"` (from TwitchChannelPointsMiner, unverified here; Task 6 confirms live).
+- Streak reason code `"WATCH_STREAK"`, bonus reason code `"CLAIM"` (from TwitchChannelPointsMiner, unverified here; the live test in Task 7 checks them).
 - Logs: INFO for idle start, switch, visit start, visit end, and each claim; nothing per `points-earned`. Never log message bodies or balances above DEBUG.
 - Diagnostics: counts and flags only (`idle_channels_total`, `claim_channel_points`), never logins or balances.
 - Commit messages: Conventional Commits in English, no AI attribution trailers. Do not push.
@@ -145,7 +145,7 @@
 **Interfaces:**
 - Consumes: `active`, `visit`, `poke()` (Task 4); `settings.claim_channel_points` (Task 1).
 - Produces: `async def process_points(self, user_id: int, message: JsonType) -> None`, `async def refresh_points(self, channel: Channel) -> None`, `balances: dict[int, int]`.
-- Message shapes used in tests (from TwitchChannelPointsMiner, confirmed live in Task 6): `{"type": "points-earned", "data": {"channel_id": "123", "point_gain": {"reason_code": "WATCH", "total_points": 10}, "balance": {"balance": 1510, "channel_id": "123"}}}` and `{"type": "claim-available", "data": {"claim": {"id": "abc", "channel_id": "123"}}}`. `ChannelPointsContext` answer: `data.community.channel.self.communityPoints.balance` (int) and `.availableClaim` (null or an object with `id`), checked live on 2026-11-23.
+- Message shapes used in tests (from TwitchChannelPointsMiner; only the `ChannelPointsContext` read was checked live, the message shapes and the claim are checked in the live test, Task 7): `{"type": "points-earned", "data": {"channel_id": "123", "point_gain": {"reason_code": "WATCH", "total_points": 10}, "balance": {"balance": 1510, "channel_id": "123"}}}` and `{"type": "claim-available", "data": {"claim": {"id": "abc", "channel_id": "123"}}}`. `ChannelPointsContext` answer: `data.community.channel.self.communityPoints.balance` (int) and `.availableClaim` (null or an object with `id`), checked live with a read-only probe.
 
 - [ ] **Step 1: Write the failing tests** with a fake `gql_request`:
   - `test_claim_only_for_idle_watched_channel`: `claim-available` for the watched idle channel sends one `ClaimCommunityPoints` with `{"input": {"claimID": "abc", "channelID": "123"}}`; for another channel nothing is sent.

@@ -119,7 +119,7 @@ src/
 ├── websocket/       # Real-time updates (websocket connection, pool)
 ├── web/             # Web GUI (app, gui_manager, api/)
 │   └── managers/    # Individual UI managers (status, console, channels, campaigns, inventory, login, settings, cache, broadcaster)
-├── services/        # Business logic services (channel, inventory, watch, maintenance, message_handlers)
+├── services/        # Business logic services (channel, inventory, watch, maintenance, message_handlers, idle_watch)
 ├── core/            # Core client (Twitch client)
 ├── drop_history.py  # Claimed drop history store (JSON persistence + CSV/JSON export)
 ├── exceptions.py    # Custom exceptions
@@ -164,6 +164,7 @@ lang/                # Translation JSON files (20 languages)
 - `WatchService`: Drop mining watch payload logic
 - `MaintenanceService`: Periodic maintenance tasks
 - `MessageHandlerService`: Websocket message routing and handling
+- `IdleWatchService`: Watches the owner's idle channels for streaks and channel points when nothing can be mined
 
 
 **src/models/channel.py** - Channel and Stream:
@@ -560,6 +561,8 @@ progress to an ignored drop while the miner intentionally targets another reward
 5. **CHANNELS_FETCH** - Discover channels via ACL lists or game directories
 6. **CHANNEL_SWITCH** - Select best channel to watch based on priority/ACL
 7. Loop between CHANNEL_SWITCH and periodic INVENTORY_FETCH (hourly)
+
+Only the two "nothing to mine" IDLE entries (`change_state(State.IDLE, idle_watch=True)`: no campaigns, and no channel in CHANNEL_SWITCH) start idle watching. Leaving IDLE must go through `change_state`, never a bare `self._state` assignment, so the idle loop stops and releases its channel.
 
 ### Authentication and integrated browser login
 
