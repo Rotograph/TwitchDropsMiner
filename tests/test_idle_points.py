@@ -13,12 +13,15 @@ def chan(cid=123, name="A"):
     return SimpleNamespace(id=cid, name=name, login=name.lower())
 
 
+CLAIM_OK = {"data": {"claimCommunityPoints": {"error": None, "claim": {"id": "x"}}}}
+
+
 def setup(*, active=True, claim=True, watched=None, gql=None):
     watched = watched or chan()
     tw = SimpleNamespace(
         channels={watched.id: watched, 7: chan(7, "B")},
         settings=SimpleNamespace(idle_channels=["a", "b"], claim_channel_points=claim),
-        gql_request=gql or AsyncMock(return_value={"data": {}}),
+        gql_request=gql or AsyncMock(return_value=CLAIM_OK),
         gui=SimpleNamespace(status=MagicMock()),
         watching_channel=SimpleNamespace(get_with_default=lambda d: watched),
         can_watch=MagicMock(return_value=False),
@@ -123,7 +126,7 @@ async def test_one_info_per_claim(caplog):
 @pytest.mark.asyncio
 async def test_failed_claim_logs_no_info_and_is_retried(caplog):
     # F1: a failed request must not mark the claim as done
-    gql = AsyncMock(side_effect=[TimeoutError(), {"data": {}}, {"data": {}}])
+    gql = AsyncMock(side_effect=[TimeoutError(), CLAIM_OK, CLAIM_OK])
     svc, tw, _ = setup(gql=gql)
     with caplog.at_level(logging.INFO, logger="TwitchDrops"):
         await svc.process_points(1, claim_msg())
@@ -131,6 +134,26 @@ async def test_failed_claim_logs_no_info_and_is_retried(caplog):
         await svc.process_points(1, claim_msg())
         await svc.process_points(1, claim_msg())
     assert len(sent(tw)) == 2
+    assert len([r for r in caplog.records if r.levelno == logging.INFO]) == 1
+
+
+@pytest.mark.asyncio
+async def test_claim_reply_with_error_field_is_not_marked(caplog):
+    reply = {"data": {"claimCommunityPoints": {"error": {"code": "NOT_FOUND"}}}}
+    svc, tw, _ = setup(gql=AsyncMock(return_value=reply))
+    with caplog.at_level(logging.INFO, logger="TwitchDrops"):
+        await svc.process_points(1, claim_msg())
+    assert "abc" not in svc._claimed
+    assert not [r for r in caplog.records if r.levelno == logging.INFO]
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+
+@pytest.mark.asyncio
+async def test_claim_reply_without_error_is_marked(caplog):
+    svc, tw, _ = setup(gql=AsyncMock(return_value=CLAIM_OK))
+    with caplog.at_level(logging.INFO, logger="TwitchDrops"):
+        await svc.process_points(1, claim_msg())
+    assert "abc" in svc._claimed
     assert len([r for r in caplog.records if r.levelno == logging.INFO]) == 1
 
 
@@ -201,7 +224,7 @@ async def test_refresh_points_reads_balance_and_claims_open_bonus():
     context = {"data": {"community": {"channel": {"self": {"communityPoints": {
         "balance": 900, "availableClaim": {"id": "x"},
     }}}}}}
-    svc, tw, watched = setup(gql=AsyncMock(return_value=context))
+    svc, tw, watched = setup(gql=AsyncMock(side_effect=[context, CLAIM_OK, context]))
     await svc.refresh_points(watched)
     assert svc.balances == {123: 900}
     ops = sent(tw)

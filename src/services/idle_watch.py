@@ -203,9 +203,23 @@ class IdleWatchService:
         finally:
             self._claiming.discard(claim_id)
         # a failed request stays unclaimed, so the next claim-available or refresh retries it
-        if response is not None:
-            self._claimed.add(claim_id)
-            logger.info("Claimed channel points bonus on %s", channel.name)
+        if response is None:
+            return
+        try:
+            result = response["data"]["claimCommunityPoints"]
+            error = result.get("error") if isinstance(result, dict) else True
+        except (KeyError, TypeError):
+            result, error = None, True
+        if not isinstance(result, dict) or error is not None:
+            # the reply carries an error code (for example an already claimed bonus) instead of the claim
+            code = error.get("code") if isinstance(error, dict) else error
+            logger.warning(
+                "Channel points request ClaimCommunityPoints was not accepted%s",
+                f" ({code})" if isinstance(code, str) else "",
+            )
+            return
+        self._claimed.add(claim_id)
+        logger.info("Claimed channel points bonus on %s", channel.name)
 
     async def refresh_points(self, channel: Channel) -> None:
         """Read the balance of a newly watched channel and claim a bonus that is already open."""
