@@ -2,8 +2,11 @@
 
 import asyncio
 import inspect
+import json
 import logging
 import re
+import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -12,18 +15,19 @@ import pytest
 from src.config import MAX_CHANNELS, State, WebsocketTopic
 from src.core.client import Twitch
 from src.services import idle_watch as idle_mod
+from src.services.channel_service import ChannelService
 from src.services.idle_watch import IDLE_VISIT_SECONDS, IdleWatchService
 from src.services.message_handlers import MessageHandlerService
 
 
 def fake(cid, broadcast, *, online=True, banned=False, login=None):
     return SimpleNamespace(
-        id=cid, login=login or f"c{cid}", online=online, banned=banned,
+        id=cid, login=login or f"c{cid}", online=online, banned=banned, ban_expires_at=None,
         _stream=SimpleNamespace(broadcast_id=broadcast),
     )
 
 
-def service(channels=None, idle=(), gql=None):
+def service(channels=None, idle=(), gql=None, visits_path=None):
     handlers = SimpleNamespace(process_stream_state=object(), process_stream_update=object())
     twitch = SimpleNamespace(
         channels=dict(channels or {}),
@@ -34,7 +38,7 @@ def service(channels=None, idle=(), gql=None):
         _message_handler_service=handlers,
         _channel_service=SimpleNamespace(filter_banned_channels=AsyncMock(side_effect=list)),
     )
-    return IdleWatchService(twitch), twitch
+    return IdleWatchService(twitch, visits_path), twitch
 
 
 def test_first_due_channel_gets_a_visit():
@@ -600,12 +604,14 @@ async def test_authentication_change_drains_idle_task_and_forgets_account_state(
     svc._skipped.add("x")
     svc._claimed.add("c")
     svc._seen_list = ["x"]
+    (tmp_path / "idle_visits.json").write_text('{"10": 1}', encoding="utf-8")
     async with client.authentication_change():
         assert cleaned.is_set() and task.done()
     assert not svc.active
     assert (svc.balances, svc.visited, svc.visit, svc._skipped, svc._claimed, svc._seen_list) == (
         {}, {}, None, set(), set(), None,
     )
+    assert not (tmp_path / "idle_visits.json").exists()  # visits belong to the account
 
 
 @pytest.mark.asyncio
@@ -641,9 +647,9 @@ async def test_banned_logins_warn_once(caplog):
 # --- second final review fixes (FR) ---
 
 
-def run_service(channels=None, idle=(), gql=None):
+def run_service(channels=None, idle=(), gql=None, visits_path=None):
     """A real track()/pick() loop on the fake client, one tick per wait (IDLE_TICK_SECONDS stays 30)."""
-    svc, tw = service(channels, idle=idle, gql=gql)
+    svc, tw = service(channels, idle=idle, gql=gql, visits_path=visits_path)
     tw.is_mining_time = MagicMock(return_value=True)
     tw._auth_state = SimpleNamespace(_logged_in=SimpleNamespace(is_set=lambda: True))
     tw._watching = None
@@ -912,3 +918,148 @@ def test_state_change_without_a_running_idle_loop_keeps_the_watch():
     client = stopping_client(can_watch=False)
     client.change_state(State.IDLE, idle_watch=True)
     client.stop_watching.assert_not_called()
+
+
+# --- follow-up fixes after the live test ---
+
+
+def banning_service(monkeypatch, status):
+    """track() through the real ChannelService ban filter; status is the ban the account has on login b."""
+    now = [time.time()]
+    monkeypatch.setattr("src.models.channel.time", lambda: now[0])
+    monkeypatch.setattr(idle_mod, "time", SimpleNamespace(time=lambda: now[0], monotonic=time.monotonic))
+    ban = [status]
+
+    async def gql(ops):
+        if "channel" in ops[0].get("variables", {}):
+            return [user(2, "b", live=False)]
+        return [{"data": {"user": {"id": "2", "self": {"banStatus": ban[0]}}}}]
+
+    svc, tw = service(idle=["b"], gql=AsyncMock(side_effect=gql))
+    tw.request_games_update = MagicMock()
+    tw._channel_service = ChannelService(tw)
+    return svc, tw, now, ban
+
+
+@pytest.mark.asyncio
+async def test_timed_ban_is_retried_once_it_expires(monkeypatch):
+    svc, tw, now, ban = banning_service(monkeypatch, None)
+    ban[0] = {"isPermanent": False, "expiresAt": datetime.fromtimestamp(now[0] + 600, timezone.utc).isoformat()}
+    try:
+        await svc.track()
+        now[0] += 590
+        await svc.track()
+        assert 2 not in tw.channels
+        assert tw.gql_request.await_count == 2  # one lookup and one ban check; nothing before expiry
+        now[0] += 11
+        ban[0] = None
+        tracked = await svc.track()  # same list, same idle run
+        assert [c.login for c in tracked] == ["b"]
+        assert 2 in tw.channels
+    finally:
+        tw._channel_service.clear_bans()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [{"isPermanent": True}, {"isPermanent": False}])
+async def test_ban_without_expiry_stays_skipped(monkeypatch, status):
+    # a timed ban without a usable expiry waits for a list change or a new idle entry, like a permanent one
+    svc, tw, now, _ = banning_service(monkeypatch, status)
+    try:
+        await svc.track()
+        now[0] += 30 * 86400
+        await svc.track()
+        assert 2 not in tw.channels
+        assert tw.gql_request.await_count == 2
+    finally:
+        tw._channel_service.clear_bans()
+
+
+def visit_channels():
+    a, b = fake(1, 10, login="a"), fake(2, 20, login="b")
+    a.name, b.name = "A", "B"
+    return a, b
+
+
+@pytest.mark.asyncio
+async def test_visits_survive_a_restart_and_are_written_on_change_only(tmp_path, monkeypatch):
+    path = tmp_path / "idle_visits.json"
+    saves = []
+    real_save = idle_mod.json_save
+    monkeypatch.setattr(idle_mod, "json_save", lambda *a, **k: (saves.append(a[1]), real_save(*a, **k)))
+    a, b = visit_channels()
+    svc, _ = run_service({1: a, 2: b}, idle=["a", "b"], visits_path=path)
+    await idle_entry(svc)  # visit of a starts: nothing visited yet
+    assert saves == []
+    svc.visit.done = True
+    await idle_entry(svc, ticks=3)  # a visited, b's visit runs for three ticks
+    assert json.loads(path.read_text(encoding="utf-8")) == {"10": 1}
+    assert len(saves) == 1
+    restarted, _ = service({1: a, 2: b}, idle=["a", "b"], visits_path=path)
+    assert restarted.visited == {10: 1}
+    assert restarted.pick([a, b], 0) is b  # a's broadcast is not visited again after the restart
+
+
+@pytest.mark.parametrize("contents", [
+    "not json", "[1, 2]", '{"x": 1}', '{"10": true}', '{"10": "1"}', '{"-1": 1}', bytes([0xFF, 0xFE]),
+])
+def test_corrupt_visits_file_starts_empty_with_one_warning(tmp_path, caplog, contents):
+    path = tmp_path / "idle_visits.json"
+    if isinstance(contents, bytes):
+        path.write_bytes(contents)
+    else:
+        path.write_text(contents, encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
+        svc, _ = service(visits_path=path)
+    assert svc.visited == {}
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].startswith("Idle visits file unreadable (")  # exception type only, no file contents
+
+
+def test_missing_visits_file_starts_empty_without_a_warning(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
+        svc, _ = service(visits_path=tmp_path / "idle_visits.json")
+    assert svc.visited == {}
+    assert caplog.records == []
+
+
+def test_reset_removes_the_visits_file(tmp_path):
+    path = tmp_path / "idle_visits.json"
+    path.write_text('{"10": 1}', encoding="utf-8")
+    svc, _ = service(visits_path=path)
+    assert svc.visited == {10: 1}
+    svc.reset()
+    assert svc.visited == {} and not path.exists()
+
+
+def test_visited_stays_bounded_for_channels_that_left_the_list_while_untracked(tmp_path):
+    # untracked channels keep their visits under the existing rules, so old entries are capped
+    path = tmp_path / "idle_visits.json"
+    path.write_text(json.dumps({str(b): 5000 + b for b in range(1, 101)}), encoding="utf-8")
+    svc, _ = service(visits_path=path)
+    a, _b = visit_channels()
+    svc.pick([a], 0)
+    assert len(svc.visited) == idle_mod.IDLE_VISITS_KEPT
+    assert list(svc.visited)[-1] == 100  # the newest entries stay
+    svc.visit.done = True
+    svc.pick([a], 1)
+    assert len(svc.visited) == idle_mod.IDLE_VISITS_KEPT
+    assert list(svc.visited)[-1] == 10
+
+
+@pytest.mark.asyncio
+async def test_unwritable_visits_file_warns_and_keeps_idle_watching(tmp_path, monkeypatch, caplog):
+    def fail(*args, **kwargs):
+        raise PermissionError("secret path")
+
+    monkeypatch.setattr(idle_mod, "json_save", fail)
+    a, b = visit_channels()
+    svc, tw = run_service({1: a, 2: b}, idle=["a", "b"], visits_path=tmp_path / "idle_visits.json")
+    svc.visited = {99: 7}
+    with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
+        await idle_entry(svc, ticks=3)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings.count("Idle visits could not be saved (PermissionError)") == 1
+    assert "secret path" not in caplog.text
+    assert tw._watching is a

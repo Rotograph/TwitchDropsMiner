@@ -131,3 +131,26 @@ async def test_gql_client_passes_retry_to_the_http_client(monkeypatch, kwargs, s
     else:
         assert await gql.request(GQLRawQuery("mutation Op { x }"), **kwargs) == OK
     assert session.request.call_count == sends
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message", ["service error", "PersistedQueryNotFound"])
+@pytest.mark.parametrize("op, logged", [
+    (GQLRawQuery("query Op { x }", operation_name="Named"), "Named"),
+    (GQLRawQuery("query { x }"), "unknown"),
+])
+async def test_single_retry_reply_without_extensions_is_retried_once(monkeypatch, caplog, message, op, logged):
+    # a reply without "extensions" raised KeyError in the log line instead of being retried
+    gql, browser = client(monkeypatch, [{"errors": [{"message": message}]}, OK])
+    assert await gql.request(op) == OK
+    assert browser.gql.call_count == 2
+    assert f"Retrying a {message} for {logged}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_single_retry_log_names_the_batch_entry_that_failed(monkeypatch, caplog):
+    gql, browser = client(monkeypatch, [[OK, {"errors": [{"message": "service error"}], "extensions": []}], [OK, OK]])
+    ops = [GQLRawQuery("query A { x }", operation_name="A"), GQLRawQuery("query B { x }", operation_name="B")]
+    assert await gql.request(ops) == [OK, OK]
+    assert browser.gql.call_count == 2
+    assert "Retrying a service error for B" in caplog.text

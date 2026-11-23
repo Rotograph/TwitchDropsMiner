@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -22,11 +23,12 @@ from src.config import GQL_OPERATIONS, MAX_CHANNELS, GQLRawQuery, State, Websock
 from src.exceptions import ExitRequest, GQLException, MinerException
 from src.i18n import _
 from src.models.channel import Channel
-from src.utils import chunk, task_wrapper
+from src.utils import chunk, json_save, task_wrapper
 
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from src.config import GQLOperation, GQLQuery, GQLRequest, JsonType
     from src.core.client import Twitch
@@ -41,6 +43,8 @@ CLAIM_REASON = "CLAIM"
 STREAK_SHARE_CHECK_SECONDS = 300
 STREAK_SHARE_ATTEMPTS = 2
 STREAK_SHARE_TIMEOUT = 30
+# visits kept (and saved); twice the idle list's 20-login cap, oldest dropped first
+IDLE_VISITS_KEPT = 40
 # the design doc's strings plus an operation name; the share mutation is unverified until seen live
 MILESTONES_OPERATION = "ViewerMilestones"
 MILESTONES_QUERY = (
@@ -61,10 +65,12 @@ class Visit:
 
 
 class IdleWatchService:
-    def __init__(self, twitch: Twitch) -> None:
+    def __init__(self, twitch: Twitch, visits_path: Path | None = None) -> None:
         self._twitch = twitch
-        # broadcast id -> channel id of finished visits
-        self.visited: dict[int, int] = {}
+        # broadcast id -> channel id of finished visits, kept across restarts in visits_path
+        self._visits_path = visits_path
+        self.visited: dict[int, int] = self._load_visits()
+        self._saved_visits = dict(self.visited)
         self.visit: Visit | None = None
         # when the loop last stopped, so a visit does not count the time spent mining drops
         self._paused_at: float | None = None
@@ -72,6 +78,8 @@ class IdleWatchService:
         self._wake = asyncio.Event()
         # logins track() gave up on (unknown, banned, over the cap) for this idle run
         self._skipped: set[str] = set()
+        # skipped logins whose ban ends: login -> expiry (epoch seconds), retried once it has passed
+        self._ban_ends: dict[str, float] = {}
         self._seen_list: list[str] | None = None
         self.balances: dict[int, int] = {}
         # claim ids claimed on the channel being watched; cleared when it changes
@@ -120,6 +128,12 @@ class IdleWatchService:
     def reset(self) -> None:
         """Forget the previous account's visits, balances, claims and lookups."""
         self.visited.clear()
+        self._saved_visits = {}
+        if self._visits_path is not None:
+            try:
+                self._visits_path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("Idle visits file could not be removed (%s)", type(exc).__name__)
         self.visit = None
         self._last_visit = None
         self._paused_at = None
@@ -130,10 +144,42 @@ class IdleWatchService:
         self._share_checked = None
         self._share_now = False
         self._skipped.clear()
+        self._ban_ends.clear()
         self._seen_list = None
 
     def poke(self) -> None:
         self._wake.set()
+
+    def _load_visits(self) -> dict[int, int]:
+        """The saved visits; a missing file is empty, an unreadable one is empty with a warning."""
+        if self._visits_path is None:
+            return {}
+        try:
+            raw = json.loads(self._visits_path.read_text(encoding="utf8"))
+            if not isinstance(raw, dict):
+                raise ValueError
+            visits = {}
+            for broadcast, channel_id in raw.items():
+                if not (broadcast.isascii() and broadcast.isdigit()) or type(channel_id) is not int:
+                    raise ValueError
+                visits[int(broadcast)] = channel_id
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as exc:
+            # exception type only: the file is not echoed into the log
+            logger.warning("Idle visits file unreadable (%s), starting empty", type(exc).__name__)
+            return {}
+        return visits
+
+    def _save_visits(self) -> None:
+        """Write the visits when they changed since the last write (or failed write)."""
+        if self._visits_path is None or self.visited == self._saved_visits:
+            return
+        self._saved_visits = dict(self.visited)
+        try:
+            json_save(self._visits_path, self.visited)
+        except OSError as exc:
+            logger.warning("Idle visits could not be saved (%s)", type(exc).__name__)
 
     def show_status(self) -> None:
         """Re-show "Idle watching <channel>" while the loop's channel is still watched."""
@@ -148,6 +194,7 @@ class IdleWatchService:
         self.watched = None
         # each idle entry retries the logins the previous run gave up on
         self._skipped.clear()
+        self._ban_ends.clear()
         if self._paused_at is not None and self.visit is not None:
             self.visit.started += time.monotonic() - self._paused_at
         self._paused_at = None
@@ -186,6 +233,7 @@ class IdleWatchService:
             # no response body: the exception type is enough to diagnose
             logger.warning("Idle channel lookup failed (%s), retrying", type(exc).__name__)
         channel = self.pick(self.live_channels(), time.monotonic())
+        self._save_visits()
         if self.visit is not self._last_visit:
             if self._last_visit is not None:
                 logger.info("Idle visit ended: broadcast %s", self._last_visit.broadcast_id)
@@ -506,9 +554,8 @@ class IdleWatchService:
         # cleanup) keeps its visit, so it is not visited twice in one stream.
         listed = set(self._twitch.settings.idle_channels)
         unlisted = {c.id for c in self._twitch.channels.values() if c.login not in listed}
-        self.visited = {
-            b: cid for b, cid in self.visited.items() if cid not in unlisted and ids.get(cid, b) == b
-        }
+        kept = [(b, cid) for b, cid in self.visited.items() if cid not in unlisted and ids.get(cid, b) == b]
+        self.visited = dict(kept[-IDLE_VISITS_KEPT:])
         for channel in live:
             if ids[channel.id] not in self.visited:
                 self.visit = Visit(channel.id, ids[channel.id], now)
@@ -547,6 +594,11 @@ class IdleWatchService:
         if logins != self._seen_list:
             self._seen_list = logins
             self._skipped.clear()
+            self._ban_ends.clear()
+        now = time.time()
+        for login in [login for login, end in self._ban_ends.items() if end <= now]:
+            del self._ban_ends[login]
+            self._skipped.discard(login)
         known = {c.login for c in twitch.channels.values()}
         missing = [login for login in logins if login not in known and login not in self._skipped]
         new: list[Channel] = []
@@ -601,5 +653,7 @@ class IdleWatchService:
             if channel is not None and (channel.id in banned or channel.banned) and login not in self._skipped:
                 logger.warning("Idle channel %s skipped: banned", login)
                 self._skipped.add(login)
+                if channel.ban_expires_at is not None:
+                    self._ban_ends[login] = channel.ban_expires_at
         self._skipped |= {login for login, c in resolved.items() if c.id not in twitch.channels}
         return [c for login in logins if (c := by_login.get(login)) is not None and c.id in twitch.channels]

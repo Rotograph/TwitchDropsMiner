@@ -144,7 +144,8 @@ class GQLClient:
             response_list = response_json if isinstance(response_json, list) else [response_json]
 
             force_retry: bool = False
-            for response_json in response_list:
+            op_list = ops if isinstance(ops, list) else [ops]
+            for index, response_json in enumerate(response_list):
                 # GQL error handling
                 if "errors" in response_json:
                     for error_dict in response_json["errors"]:
@@ -158,7 +159,7 @@ class GQLClient:
                                 else:
                                     logger.error(
                                         f"Retrying a {error_dict['message']} for "
-                                        f"{response_json['extensions']['operationName']}"
+                                        f"{self._operation_name(response_json, op_list, index)}"
                                     )
                                 single_retry = False
                                 if delay < 5:
@@ -195,6 +196,15 @@ class GQLClient:
             await asyncio.sleep(delay)
 
         raise RuntimeError("Retry loop was broken")
+
+    @staticmethod
+    def _operation_name(response_json: JsonType, ops: list[GQLRequest], index: int) -> str:
+        """The failed operation's name for a log line; a reply need not echo it in "extensions"."""
+        extensions = response_json.get("extensions")
+        name = extensions.get("operationName") if isinstance(extensions, dict) else None
+        if not isinstance(name, str) and index < len(ops) and isinstance(ops[index], dict):
+            name = ops[index].get("operationName")
+        return name if isinstance(name, str) else "unknown"
 
     @staticmethod
     def merge_data(primary_data: JsonType, secondary_data: JsonType) -> JsonType:
