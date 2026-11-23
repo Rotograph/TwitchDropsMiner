@@ -91,6 +91,7 @@ class SettingsUpdate(BaseModel):
     reward_priority: list[str] | None = None
     idle_channels: list[str] | None = None
     claim_channel_points: StrictBool | None = None
+    share_watch_streaks: StrictBool | None = None
     proxy: str | None = None
     connection_quality: int | None = None
     minimum_refresh_interval_minutes: int | None = None

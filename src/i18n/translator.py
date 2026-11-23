@@ -321,6 +321,9 @@ class GUISettings(TypedDict):
     claim_channel_points: str
     claim_channel_points_help: str
     claim_channel_points_save_error: str
+    share_watch_streaks: str
+    share_watch_streaks_help: str
+    share_watch_streaks_save_error: str
     general: GUISettingsGeneral
     tab_mining: str
     tab_games: str

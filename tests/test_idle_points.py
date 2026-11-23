@@ -101,12 +101,12 @@ async def test_points_earned_updates_balance_and_status():
 async def test_streak_reason_ends_visit():
     svc, _, _ = setup()
     svc.visit = Visit(123, 10, 0.0)
-    await svc.process_points(1, earned("WATCH_STREAK", channel_id="7"))
+    await svc.process_points(1, earned("WATCH_STREAK", channel_id="999"))
     assert not svc.visit.done
     svc.poke.assert_not_called()
     await svc.process_points(1, earned("WATCH_STREAK"))
     assert svc.visit.done
-    svc.poke.assert_called_once()
+    svc.poke.assert_called()
 
 
 @pytest.mark.asyncio

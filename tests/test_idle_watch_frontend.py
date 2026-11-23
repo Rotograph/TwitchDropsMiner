@@ -223,3 +223,43 @@ def test_claim_rollback_before_load_keeps_the_default_on():
     assert.equal(claim.checked, true, 'unknown server value means the default, on');
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """)
+
+
+def test_share_toggle_saves_and_keeps_the_default_on_rollback():
+    run_javascript(CLAIM_FUNCTIONS + ["onShareWatchStreaksChange"], SETUP + r"""
+state.translations.gui.settings.share_watch_streaks_save_error = '<b>Share save failed</b>';
+const share = document.getElementById('share-watch-streaks');
+const shareError = document.getElementById('share-watch-streaks-error');
+(async () => {
+    updateSettingsUI({});
+    assert.equal(share.checked, true, 'on unless the server says false');
+    updateSettingsUI({share_watch_streaks: false}, true);
+    assert.equal(share.checked, false);
+    share.checked = true;
+    global.fetch = async (url, options) => {
+        assert.deepEqual(JSON.parse(options.body), {share_watch_streaks: true});
+        return {ok: true, json: async () => ({success: true, settings: {share_watch_streaks: true}})};
+    };
+    await onShareWatchStreaksChange();
+    assert.equal(share.checked, true);
+    assert.equal(state.settings.share_watch_streaks, true);
+    // a failed save before the server value is known keeps the default (on) and shows the literal error
+    state.settings = {};
+    share.checked = false;
+    global.fetch = async () => ({ok: false});
+    await onShareWatchStreaksChange();
+    assert.equal(share.checked, true);
+    assert.equal(shareError.hidden, false);
+    assert.equal(shareError.textContent, '<b>Share save failed</b>');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+""")
+
+
+def test_share_markup_and_translations_exist():
+    html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    for fragment in ('id="share-watch-streaks"', 'id="share-watch-streaks-error"'):
+        assert fragment in html, fragment
+    for locale in (ROOT / "lang").glob("*.json"):
+        settings = json.loads(locale.read_text(encoding="utf-8"))["gui"]["settings"]
+        for key in ("share_watch_streaks", "share_watch_streaks_help", "share_watch_streaks_save_error"):
+            assert settings[key].strip(), (locale.name, key)

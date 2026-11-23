@@ -27,7 +27,7 @@ def service(channels=None, idle=(), gql=None):
     handlers = SimpleNamespace(process_stream_state=object(), process_stream_update=object())
     twitch = SimpleNamespace(
         channels=dict(channels or {}),
-        settings=SimpleNamespace(idle_channels=list(idle)),
+        settings=SimpleNamespace(idle_channels=list(idle), share_watch_streaks=False),
         gql_request=gql or AsyncMock(),
         gui=SimpleNamespace(channels=MagicMock(), login=MagicMock()),
         websocket=MagicMock(),

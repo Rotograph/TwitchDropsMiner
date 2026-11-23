@@ -1473,7 +1473,7 @@ function updateSettingsUI(settings, authoritative = false, changedFields = []) {
         settings = {...settings, mining_benefits: state.settings.mining_benefits};
     }
     // Same for the idle watching list and the claim toggle: a partial reply must not undo a confirmed write.
-    for (const key of ['idle_channels', 'claim_channel_points']) {
+    for (const key of ['idle_channels', 'claim_channel_points', 'share_watch_streaks']) {
         if (!authoritative && !changedFields.includes(key) && state.settings[key] !== undefined) {
             settings = {...settings, [key]: state.settings[key]};
         }
@@ -1486,6 +1486,8 @@ function updateSettingsUI(settings, authoritative = false, changedFields = []) {
     if (preferFollowed && !preferFollowed.disabled) preferFollowed.checked = settings.prefer_followed_channels === true;
     const claimPoints = document.getElementById('claim-channel-points');
     if (claimPoints && !claimPoints.disabled) claimPoints.checked = settings.claim_channel_points !== false;
+    const shareStreaks = document.getElementById('share-watch-streaks');
+    if (shareStreaks && !shareStreaks.disabled) shareStreaks.checked = settings.share_watch_streaks !== false;
     if (typeof renderIdleChannels === 'function') renderIdleChannels(settings.idle_channels || []);
     renderNotificationEvents();
     document.getElementById('dark-mode').checked = settings.dark_mode || false;
@@ -2742,8 +2744,9 @@ async function saveBooleanSetting(key, inputId, errorId, message) {
         error.hidden = false;
     } finally {
         input.disabled = false;
-        // claim_channel_points defaults to on, so a rollback before the server value is known keeps it on.
-        input.checked = key === 'claim_channel_points' ? state.settings[key] !== false : state.settings[key] === true;
+        // these two default to on, so a rollback before the server value is known keeps them on.
+        input.checked = (key === 'claim_channel_points' || key === 'share_watch_streaks')
+            ? state.settings[key] !== false : state.settings[key] === true;
     }
 }
 
@@ -2763,6 +2766,12 @@ function onClaimChannelPointsChange() {
     return saveBooleanSetting('claim_channel_points', 'claim-channel-points', 'claim-channel-points-error',
         state.translations.gui?.settings?.claim_channel_points_save_error ||
         'Could not save the channel points option. Please try again.');
+}
+
+function onShareWatchStreaksChange() {
+    return saveBooleanSetting('share_watch_streaks', 'share-watch-streaks', 'share-watch-streaks-error',
+        state.translations.gui?.settings?.share_watch_streaks_save_error ||
+        'Could not save the watch streak option. Please try again.');
 }
 
 const idleChannelPattern = /^[a-z0-9_]{1,25}$/;
@@ -3045,6 +3054,12 @@ function applyTranslations(t) {
         if (claimHelp) claimHelp.textContent = t.gui.settings.claim_channel_points_help;
         const claimError = document.getElementById('claim-channel-points-error');
         if (claimError && !claimError.hidden) claimError.textContent = t.gui.settings.claim_channel_points_save_error;
+        const shareLabel = document.getElementById('share-watch-streaks-label');
+        if (shareLabel) shareLabel.textContent = t.gui.settings.share_watch_streaks;
+        const shareHelp = document.getElementById('share-watch-streaks-help');
+        if (shareHelp) shareHelp.textContent = t.gui.settings.share_watch_streaks_help;
+        const shareError = document.getElementById('share-watch-streaks-error');
+        if (shareError && !shareError.hidden) shareError.textContent = t.gui.settings.share_watch_streaks_save_error;
         const idleError = document.getElementById('idle-channels-error');
         if (idleError && !idleError.hidden) idleError.textContent = t.gui.settings.idle_channels_save_error;
         const idleInput = document.getElementById('idle-channel-input');
@@ -3599,6 +3614,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('allow-unlinked-campaigns').addEventListener('change', onUnlinkedMiningChange);
     document.getElementById('prefer-followed-channels').addEventListener('change', onPreferFollowedChange);
     document.getElementById('claim-channel-points').addEventListener('change', onClaimChannelPointsChange);
+    document.getElementById('share-watch-streaks').addEventListener('change', onShareWatchStreaksChange);
     document.getElementById('idle-channel-add').addEventListener('click', addIdleChannel);
     document.getElementById('idle-channel-input').addEventListener('keydown', event => {
         if (event.key === 'Enter') addIdleChannel();

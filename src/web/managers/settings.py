@@ -188,6 +188,9 @@ class SettingsManager:
         claim_points = settings_data.get("claim_channel_points")
         if claim_points is not None and not isinstance(claim_points, bool):
             raise ValueError("invalid_claim_channel_points")
+        share_streaks = settings_data.get("share_watch_streaks")
+        if share_streaks is not None and not isinstance(share_streaks, bool):
+            raise ValueError("invalid_share_watch_streaks")
         idle_channels = settings_data.get("idle_channels")
         if idle_channels is not None:
             idle_channels = IdleChannelSettings.normalize(idle_channels)
@@ -228,6 +231,7 @@ class SettingsManager:
             log_formatter=lambda names: f"{len(names)} channels",
         )
         self.check_and_update_setting("claim_channel_points", claim_points)
+        self.check_and_update_setting("share_watch_streaks", share_streaks)
         should_trigger_update |= self.check_and_update_setting(
             "dark_mode", settings_data.get("dark_mode")
         )

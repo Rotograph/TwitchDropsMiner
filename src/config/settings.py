@@ -37,6 +37,7 @@ default_settings = {
     "discord_webhook_url": "",
     "drop_name_blacklist": [],
     "claim_channel_points": True,
+    "share_watch_streaks": True,
     "games_to_watch": [],
     "idle_channels": [],
     "language": DEFAULT_LANG,
@@ -181,6 +182,7 @@ class Settings:
     discord_webhook_url: str
     drop_name_blacklist: list[str]
     claim_channel_points: bool
+    share_watch_streaks: bool
     games_to_watch: list[str]
     idle_channels: list[str]
     language: str
@@ -226,6 +228,8 @@ class Settings:
         if not isinstance(settings.get("claim_channel_points", True), bool):
             # merge_json below replaces the wrong type with the default (on)
             logger.warning("Ignoring invalid claim_channel_points in settings; using the default (on)")
+        if not isinstance(settings.get("share_watch_streaks", True), bool):
+            logger.warning("Ignoring invalid share_watch_streaks in settings; using the default (on)")
         # Early builds stored a single release version. Preserve their announce-once behavior.
         last_notified = settings.pop("last_notified_release", None)
         if isinstance(last_notified, str) and "last_notified_releases" not in settings:

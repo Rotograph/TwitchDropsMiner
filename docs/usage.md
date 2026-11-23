@@ -262,6 +262,7 @@ versioned frontend controls.
 - Each live listed channel gets one visit of up to 7 minutes per stream, to count toward its watch streak.
 - After the visits, TDM watches the highest live listed channel for channel points. The order of the list is the priority.
 - **Claim channel points bonus while idle watching** (on by default) claims the channel points bonus. It claims only while idle watching, never while mining drops.
+- **Share watch streaks while idle watching** (on by default) shares a watch streak once Twitch marks it shareable, once per milestone, for live listed channels. The check runs about every 5 minutes and right after a watch streak message. Twitch posts a visible watch streak notice in the streamer's chat under your name, and a share may give bonus channel points. Sharing happens only while idle watching, never while mining drops. The share request is unverified until seen live.
 - Streak counting, the bonus claim (`ClaimCommunityPoints`) and the websocket points messages are untested until they are seen live. Treat them as unverified.
 - TDM tracks at most 198 channels, drop and idle channels together: the channel points topic takes one websocket slot. Idle channels over that limit are skipped with a warning and retried the next time idle watching starts.
 

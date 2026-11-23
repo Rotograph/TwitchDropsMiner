@@ -29,6 +29,7 @@ def test_defaults(tmp_path, monkeypatch):
     settings = Settings()
     assert settings.idle_channels == []
     assert settings.claim_channel_points is True
+    assert settings.share_watch_streaks is True
 
 
 def test_invalid_idle_channels_in_file_do_not_block_load(tmp_path, monkeypatch, caplog):
@@ -79,6 +80,29 @@ def test_non_bool_claim_setting_loads_as_default_with_one_warning(tmp_path, monk
     assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == (1 if warned else 0)
 
 
+@pytest.mark.parametrize("raw,warned", [('"false"', True), ("0", True), ("null", True), ("false", False)])
+def test_non_bool_share_setting_loads_as_default_with_one_warning(tmp_path, monkeypatch, caplog, raw, warned):
+    path = tmp_path / "settings.json"
+    path.write_text(f'{{"share_watch_streaks": {raw}}}', encoding="utf-8")
+    monkeypatch.setattr("src.config.settings.SETTINGS_PATH", path)
+    with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
+        settings = Settings()
+    assert settings.share_watch_streaks is warned
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == (1 if warned else 0)
+
+
+def test_share_watch_streaks_requires_strict_bool_and_saves():
+    manager, stored, on_change, _ = _manager()
+    with pytest.raises(ValueError, match="invalid_share_watch_streaks"):
+        _update(manager, {"share_watch_streaks": "false"})
+    assert stored.share_watch_streaks is True
+    stored.save.assert_not_called()
+    response = _update(manager, {"share_watch_streaks": False})
+    assert stored.share_watch_streaks is False
+    assert response["share_watch_streaks"] is False
+    on_change.assert_not_called()
+
+
 @pytest.mark.parametrize("login", ["Kelvin", "café", " foo", "foo​"])
 def test_normalize_rejects_non_ascii_before_lowering(login):
     # F6: the Kelvin sign lowercases to an ASCII "k"
@@ -87,7 +111,7 @@ def test_normalize_rejects_non_ascii_before_lowering(login):
 
 
 def _manager():
-    stored = SimpleNamespace(idle_channels=[], claim_channel_points=True, save=MagicMock())
+    stored = SimpleNamespace(idle_channels=[], claim_channel_points=True, share_watch_streaks=True, save=MagicMock())
     on_change = MagicMock()
     console = MagicMock()
     manager = SettingsManager(SimpleNamespace(emit=AsyncMock()), stored, console, on_change)
@@ -153,4 +177,5 @@ def test_diagnostics_report_counts_only(tmp_path):
     snapshot = miner.diagnostics.snapshot(miner)
     assert snapshot["settings"]["idle_channels_total"] == 1
     assert snapshot["settings"]["claim_channel_points"] is True
+    assert snapshot["settings"]["share_watch_streaks"] is True
     assert "secretname" not in json.dumps(snapshot)

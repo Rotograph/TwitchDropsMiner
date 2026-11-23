@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 import aiohttp
 
-from src.config import GQL_OPERATIONS, MAX_CHANNELS, State, WebsocketTopic
+from src.config import GQL_OPERATIONS, MAX_CHANNELS, GQLRawQuery, State, WebsocketTopic
 from src.exceptions import ExitRequest, GQLException, MinerException
 from src.i18n import _
 from src.models.channel import Channel
@@ -28,7 +28,7 @@ from src.utils import chunk, task_wrapper
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from src.config import GQLOperation, GQLQuery, GQLRawQuery, JsonType
+    from src.config import GQLOperation, GQLQuery, GQLRequest, JsonType
     from src.core.client import Twitch
 
 
@@ -38,6 +38,16 @@ IDLE_VISIT_SECONDS = 420
 IDLE_TICK_SECONDS = 30
 STREAK_REASON = "WATCH_STREAK"
 CLAIM_REASON = "CLAIM"
+STREAK_SHARE_CHECK_SECONDS = 300
+STREAK_SHARE_ATTEMPTS = 2
+STREAK_SHARE_TIMEOUT = 30
+# exact strings from the design doc; the share mutation is unverified until seen live
+MILESTONES_QUERY = (
+    "query($login:String!){ user(login:$login){ channel{ id self{ viewerMilestones{ id category value state shareStatus }}}}}"
+)
+SHARE_MILESTONE_MUTATION = (
+    "mutation($input: ShareViewerMilestoneInput!) { shareViewerMilestone(input: $input) { milestone { id } error { code } } }"
+)
 
 
 @dataclass
@@ -67,6 +77,11 @@ class IdleWatchService:
         # claim ids with a request in flight, so a repeated message does not send twice
         self._claiming: set[str] = set()
         self._raw_logged = False
+        # watch streak sharing: milestone ids shared this run, attempts per id, last read, early-check request
+        self._shared: set[str] = set()
+        self._share_tries: dict[str, int] = {}
+        self._share_checked: float | None = None
+        self._share_now = False
         # the channel the loop chose to watch, and the visit it last announced
         self.watched: Channel | None = None
         self._last_visit: Visit | None = None
@@ -108,6 +123,10 @@ class IdleWatchService:
         self._paused_at = None
         self.balances.clear()
         self._claimed.clear()
+        self._shared.clear()
+        self._share_tries.clear()
+        self._share_checked = None
+        self._share_now = False
         self._skipped.clear()
         self._seen_list = None
 
@@ -183,6 +202,7 @@ class IdleWatchService:
             tw.watch(channel, update_status=False)
             self._show_status(channel)
             await self.refresh_points(channel)
+        await self.share_streaks()
 
     def _show_status(self, channel: Channel) -> None:
         points = self.balances.get(channel.id)
@@ -200,19 +220,21 @@ class IdleWatchService:
         # a channel drops can use is mined, not idle watched, even before the loop hands it over
         return None if self._twitch.can_watch(watched) else watched
 
-    async def _gql(self, op: GQLOperation) -> JsonType | None:
-        """Send op; failures are logged as one warning without the response body."""
+    async def _gql(self, op: GQLRequest | list[GQLRequest], name: str | None = None) -> JsonType | list[JsonType] | None:
+        """Send op (or a batch); failures are logged as one warning without the response body."""
+        name = name or op["operationName"]  # type: ignore[index,call-overload]
         try:
             response = await self._twitch.gql_request(op)
         except ExitRequest:
             raise
         except (MinerException, aiohttp.ClientError, TimeoutError) as exc:
-            logger.warning("Channel points request %s failed (%s)", op["operationName"], type(exc).__name__)
+            logger.warning("Channel points request %s failed (%s)", name, type(exc).__name__)
             return None
-        if not isinstance(response, dict) or response.get("errors"):
-            logger.warning("Channel points request %s returned errors", op["operationName"])
-            return None
-        return response
+        # a batch answers with a list; its entries are checked by the caller
+        if isinstance(response, list) or (isinstance(response, dict) and not response.get("errors")):
+            return response
+        logger.warning("Channel points request %s returned errors", name)
+        return None
 
     async def claim(self, channel: Channel, claim_id: str) -> None:
         if (
@@ -268,6 +290,75 @@ class IdleWatchService:
             self._show_status(channel)
         if isinstance(available, dict) and isinstance(available.get("id"), str):
             await self.claim(channel, available["id"])
+
+    async def share_streaks(self) -> None:
+        """At most every 5 minutes, or when a streak was just earned, share watch streaks Twitch allows."""
+        now = time.monotonic()
+        due = self._share_now or self._share_checked is None or now - self._share_checked >= STREAK_SHARE_CHECK_SECONDS
+        if not self.active or not self._twitch.settings.share_watch_streaks or not due:
+            return
+        self._share_now = False
+        live = self.live_channels()
+        if not live:
+            return
+        self._share_checked = now
+        try:
+            await asyncio.wait_for(self._share_streaks(live), STREAK_SHARE_TIMEOUT)
+        except TimeoutError:
+            logger.warning("Watch streak share check timed out")
+
+    async def _share_streaks(self, live: list[Channel]) -> None:
+        ops: list[GQLRequest] = [GQLRawQuery(MILESTONES_QUERY, {"login": c.login}) for c in live]
+        response = await self._gql(ops, "ViewerMilestones")
+        answers = response if isinstance(response, list) else []
+        for channel, answer in zip(live, answers, strict=False):
+            for milestone in self._shareable(answer):
+                await self._share(channel, milestone)
+
+    @staticmethod
+    def _shareable(answer: object) -> list[JsonType]:
+        """The WATCH_STREAK milestones of one channel's answer that are active and can be shared."""
+        try:
+            rows = answer["data"]["user"]["channel"]["self"]["viewerMilestones"]  # type: ignore[index,call-overload]
+        except (KeyError, TypeError):
+            return []
+        if not isinstance(rows, list) or answer.get("errors"):  # type: ignore[attr-defined]
+            return []
+        return [
+            r for r in rows
+            if isinstance(r, dict)
+            and r.get("category") == STREAK_REASON
+            and r.get("state") == "ACTIVE"
+            and r.get("shareStatus") == "CAN_SHARE"
+            and isinstance(r.get("id"), str)
+            and r["id"]
+        ]
+
+    async def _share(self, channel: Channel, milestone: JsonType) -> None:
+        milestone_id = milestone["id"]
+        # the attempt counts before the request, so a transport failure uses one up
+        if milestone_id in self._shared or self._share_tries.get(milestone_id, 0) >= STREAK_SHARE_ATTEMPTS:
+            return
+        self._share_tries[milestone_id] = self._share_tries.get(milestone_id, 0) + 1
+        response = await self._gql(
+            GQLRawQuery(SHARE_MILESTONE_MUTATION, {"input": {"channelID": str(channel.id), "milestoneID": milestone_id}}),
+            "ShareViewerMilestone",
+        )
+        if response is None:
+            return
+        try:
+            result = response["data"]["shareViewerMilestone"]  # type: ignore[index,call-overload]
+            error = result.get("error") if isinstance(result, dict) else True
+        except (KeyError, TypeError):
+            result, error = None, True
+        if not isinstance(result, dict) or error is not None:
+            code = error.get("code") if isinstance(error, dict) else None
+            logger.warning(
+                "Watch streak share on %s was not accepted%s", channel.name, f" ({code})" if isinstance(code, str) else "",
+            )
+            return
+        self._shared.add(milestone_id)
+        logger.info("Shared watch streak on %s (%s streams)", channel.name, milestone.get("value"))
 
     @task_wrapper
     async def process_points(self, user_id: int, message: JsonType) -> None:
@@ -325,6 +416,10 @@ class IdleWatchService:
             self.balances[int(channel_id)] = points
             if watched is not None:
                 self._show_status(watched)
+        if reason == STREAK_REASON and listed & set(self._twitch.settings.idle_channels):
+            # the next tick runs the share check; no network work in the websocket handler
+            self._share_now = True
+            self.poke()
         visit = self.visit
         if reason == STREAK_REASON and visit is not None and str(visit.channel_id) == channel_id:
             visit.done = True
