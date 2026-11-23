@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from src.config.reward_priority import RewardPriority
 from src.config.settings import (
+    IdleChannelSettings,
     InventoryFilterSettings,
     MiningHoursSettings,
     NotificationEventSettings,
@@ -182,6 +183,12 @@ class SettingsManager:
         prefer_followed = settings_data.get("prefer_followed_channels")
         if prefer_followed is not None and not isinstance(prefer_followed, bool):
             raise ValueError("invalid_prefer_followed_channels")
+        claim_points = settings_data.get("claim_channel_points")
+        if claim_points is not None and not isinstance(claim_points, bool):
+            raise ValueError("invalid_claim_channel_points")
+        idle_channels = settings_data.get("idle_channels")
+        if idle_channels is not None:
+            idle_channels = IdleChannelSettings.normalize(idle_channels)
         language = settings_data.get("language")
         if language is not None and language not in _.get_languages():
             raise ValueError("invalid_language")
@@ -211,6 +218,11 @@ class SettingsManager:
         should_trigger_update |= self.check_and_update_setting(
             "drop_name_blacklist", drop_name_blacklist, True
         )
+        # Log the count only: the channel names stay out of the console.
+        should_trigger_update |= self.check_and_update_setting(
+            "idle_channels", idle_channels, True, log_formatter=lambda names: f"{len(names)} channels"
+        )
+        self.check_and_update_setting("claim_channel_points", claim_points)
         should_trigger_update |= self.check_and_update_setting(
             "dark_mode", settings_data.get("dark_mode")
         )
