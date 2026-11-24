@@ -34,7 +34,7 @@ Twitch OAuth login, persistent local data, and Docker support.
 
 Read [README.md](./README.md) for setup and user behavior, and
 [AGENTS.md](./AGENTS.md) for architecture and detailed implementation constraints.
-The current scope excludes multiple accounts, channel-points mining, and a desktop
+The current scope excludes multiple accounts, channel-points mining outside idle watching, and a desktop
 GUI. Campaigns reported as Not Linked are skipped by default; users may explicitly
 allow mining attempts without guaranteeing progress, claims, or reward delivery. Discuss proposed scope changes before implementing
 them; opening a feature request does not itself approve a change in scope.
@@ -326,6 +326,10 @@ Check every image before uploading: editing or replacing it later does not remov
 original from GitHub. Attach images to the PR rather than committing them to the topic
 branch, unless the PR intentionally updates a published documentation image such as
 `screenshot.png`. Update screenshots when later revisions change the visible result.
+
+Changes that do not alter the dashboard's appearance need no screenshots; write
+`Not applicable` in the template. Never post images of code, diffs, test output or
+logs: reviewers read the diff, and validation results belong in the PR as text.
 
 If you cannot attach images directly (for example from the command line), push them to
 a separate screenshots-only branch of your **public** fork instead, never to the topic

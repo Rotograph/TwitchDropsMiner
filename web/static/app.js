@@ -1489,7 +1489,7 @@ function updateSettingsUI(settings, authoritative = false, changedFields = []) {
     const claimPoints = document.getElementById('claim-channel-points');
     if (claimPoints && !claimPoints.disabled) claimPoints.checked = settings.claim_channel_points !== false;
     const shareStreaks = document.getElementById('share-watch-streaks');
-    if (shareStreaks && !shareStreaks.disabled) shareStreaks.checked = settings.share_watch_streaks !== false;
+    if (shareStreaks && !shareStreaks.disabled) shareStreaks.checked = settings.share_watch_streaks === true;
     if (typeof renderIdleChannels === 'function') renderIdleChannels(settings.idle_channels || []);
     renderNotificationEvents();
     document.getElementById('dark-mode').checked = settings.dark_mode || false;
@@ -2746,9 +2746,8 @@ async function saveBooleanSetting(key, inputId, errorId, message) {
         error.hidden = false;
     } finally {
         input.disabled = false;
-        // these two default to on, so a rollback before the server value is known keeps them on.
-        input.checked = (key === 'claim_channel_points' || key === 'share_watch_streaks')
-            ? state.settings[key] !== false : state.settings[key] === true;
+        // the claim toggle defaults to on, so a rollback before the server value is known keeps it on.
+        input.checked = key === 'claim_channel_points' ? state.settings[key] !== false : state.settings[key] === true;
     }
 }
 
@@ -2799,9 +2798,11 @@ function renderIdleChannels(list = state.settings.idle_channels || []) {
     list.forEach((channel, index) => {
         const row = makeElement('div', { class: 'sortable-item idle-channel-row' });
         row.dataset.channel = channel;
+        row.draggable = !idleChannelsSaving;
         // Not disabled while a save is in flight: that would drop focus; saveIdleChannels ignores the click.
         const button = (text, name, disabled, kind, action) => {
-            const el = makeElement('button', { type: 'button', 'aria-label': name }, text);
+            const el = makeElement('button', { type: 'button', 'aria-label': name,
+                class: kind === 'remove' ? 'remove-btn' : 'small-btn' }, text);
             el.dataset.action = kind;
             el.disabled = disabled;
             el.addEventListener('click', action);
@@ -2813,12 +2814,23 @@ function renderIdleChannels(list = state.settings.idle_channels || []) {
             return saveIdleChannels(next);
         };
         row.replaceChildren(
-            makeElement('span', { class: 'idle-channel-name' }, channel),
+            makeElement('span', { class: 'drag-handle', 'aria-hidden': 'true' }, '☰'),
+            makeElement('span', { class: 'priority-number', 'aria-hidden': 'true' }, String(index + 1)),
+            makeElement('span', { class: 'game-name idle-channel-name' }, channel),
             button('▲', label('idle_channels_up', 'Move {channel} up', channel), index === 0, 'up', moved(-1)),
             button('▼', label('idle_channels_down', 'Move {channel} down', channel),
                 index === list.length - 1, 'down', moved(1)),
             button('✕', label('idle_channels_remove', 'Remove {channel}', channel), false, 'remove',
                 () => saveIdleChannels(list.filter(item => item !== channel))));
+        row.addEventListener('dragstart', handleDragStart);
+        row.addEventListener('dragover', handleDragOver);
+        row.addEventListener('drop', handleDrop);
+        row.addEventListener('dragend', event => {
+            event.target.classList.remove('dragging');
+            draggedElement = null;
+            const order = [...container.children].map(item => item.dataset.channel);
+            if (JSON.stringify(order) !== JSON.stringify(list)) saveIdleChannels(order);
+        });
         container.appendChild(row);
     });
     if (!focused) return;
@@ -2838,7 +2850,7 @@ async function saveIdleChannels(next) {
         'Could not save the idle watching channels. Please try again.';
     error.hidden = true;
     idleChannelsSaving = true;
-    renderIdleChannels();
+    renderIdleChannels(next); // the pending order, so a moved row does not jump back while saving
     let saved = false;
     try {
         const response = await fetch('/api/settings', {method: 'POST', headers: {'Content-Type': 'application/json'},

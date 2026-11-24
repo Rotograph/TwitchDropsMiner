@@ -314,7 +314,8 @@ lang/                # Translation JSON files (20 languages)
 **src/websocket/pool.py** - WebSocket management:
 
 - Sharded connections (up to 50 topics per socket, max 198 channels)
-- Topics: User.Drops, User.Notifications, Channel.StreamState, Channel.StreamUpdate
+- Topics: User.Drops, User.Notifications, User.CommunityPoints, Channel.StreamState,
+  Channel.StreamUpdate
 - Automatic reconnection with exponential backoff
 - Message routing to registered callbacks
 
@@ -566,6 +567,19 @@ Only the two "nothing to mine" IDLE entries (`change_state(State.IDLE, idle_watc
 
 ### Authentication and integrated browser login
 
+- Current source builds prefer `LoginFirefox` when Firefox 143 or newer is available.
+  Check the version under the browser UID before opening the sign-in window. Alpine
+  Chromium can reject fresh Twitch login as unsupported. The image includes both:
+  Firefox handles manual sign-in, Chromium retains SDK issuance and renewal over a
+  private pipe on POSIX. Firefox runs with a private profile and password saving
+  disabled as `tdm-browser`.
+  Do not enable BiDi/Marionette during sign-in. Manual Finish/window close flushes
+  the profile before reopening it with loopback BiDi; validate both PID and profile
+  from `session.new` before reading cookies, then use the shared `FirefoxExporter`
+  and all existing account/catalog/server-issuance checks. Firefox requires manual
+  Finish; preserve Chromium's completion extension for the fallback path. Keep
+  profile/process/protocol cleanup cancellation-safe. Source hosts without a compatible
+  Firefox retain Chromium login. Regression: `tests/test_container_firefox.py`.
 - The temporary interactive Chromium profile disables password saving before startup.
   Its bundled completion extension observes only Twitch login-cookie presence, closes
   the owned profile's windows normally, and never exports cookie values. Treat this as
@@ -622,8 +636,8 @@ Only the two "nothing to mine" IDLE entries (`change_state(State.IDLE, idle_watc
   restore legacy cookies after explicit logout. Version 3 atomically persists a
   logged-out marker with cleared session/SDK state; successful login clears it.
 - `ContainerLogin` owns one temporary attempt with a 15-minute interactive timeout.
-  Launch ordinary Chromium at Twitch sign in without remote automation, close its
-  window normally to flush storage, then reopen the owned profile for CDP capture.
+  Launch the selected browser at Twitch sign in without remote automation, close its
+  window normally to flush storage, then reopen the owned profile for CDP/BiDi capture.
   Verify the browser PID before reading credentials. Finish sign in uses EWMH close;
   the window X works too. Profiles and all owned processes must be drained through
   cancellation, startup failures, timeout and shutdown. Never attach another profile.
@@ -669,7 +683,7 @@ Only the two "nothing to mine" IDLE entries (`change_state(State.IDLE, idle_watc
   closed on mounts that ignore chmod or give the browser ownership. Keep temporary
   display/profile directories owned by the browser UID. Root-only SDK profiles remain
   unreadable to it. Retain tests for file-access isolation and pre-login password setup.
-- Docker includes Chromium, Xvfb, openbox, x11vnc, xdotool, noVNC and timezone data.
+- Docker includes Firefox, Chromium, Xvfb, openbox, x11vnc, xdotool, noVNC and timezone data.
   Set `TZ` to the home internet connection’s timezone. Use init, shared memory and
   a cleanup grace period. Only the dashboard port is published. Display numbers are
   allocated by Xvfb to avoid stale fixed-display locks after engine restarts.
@@ -1305,12 +1319,66 @@ with this policy when reviewing proposals or documenting deployment options.
 - ✅ Docker deployment - containerized on the user's own home hardware
 - ✅ Remote access - access to the user's home-hosted instance
 - ✅ Headless operation - no display server required
+- ✅ Idle watching - watches the user's listed channels when nothing can be mined
 
 **NOT supported:**
 
 - Multi-account support
-- Channel points mining
+- Channel points mining while a drop can be mined, or on channels the user did not list
 - Desktop GUI
+
+### Idle Watching
+
+`IdleWatchService` (`src/services/idle_watch.py`) watches the channels in the
+`idle_channels` setting (lowercase logins, at most 20, validated by
+`IdleChannelSettings`) only after the two "nothing to mine" IDLE entries; any state
+change stops it and releases its channel. It never claims, shares or watches for
+points while a drop can be mined: a pick that `can_watch()` accepts goes to
+CHANNEL_SWITCH before it is watched. Claims and shares also need `is_mining_time()`.
+Other code reaches the service through the public `Twitch.idle_watch`.
+
+- Visits: each live listed channel gets one visit of `IDLE_VISIT_SECONDS` per
+  broadcast, then the highest live channel in list order is watched. A visit is
+  recorded only when it is done, ran its time or the broadcast changed; one cut short
+  because its channel left the live list starts again. Banned channels are skipped; a
+  timed ban is retried when it ends.
+- `data/idle_visits.json` holds `user_id`, the finished visits (last
+  `IDLE_VISITS_KEPT`) and the share keys (last `IDLE_SHARES_KEPT`): `[id, count]` is
+  used up, `[id, count, tries]` was refused and has tries left. An auth
+  change keeps them (`reset()` clears only session state); the next idle entry drops
+  them when another account is logged in. A file without `user_id` (the older flat
+  visits format) is taken by the first account. The file keeps one account, so
+  switching A, B, A loses A's share keys and an unknown-outcome share of A can be
+  sent again. A failed write is retried each tick. `_load()` skips invalid visit
+  entries (one warning with the count). A file that exists but cannot be read or
+  parsed as a whole, or has an invalid share entry, sets `_load_failed`: the file is
+  never written, its readable visits stay in memory and no share is sent this run.
+- Bonus claim: `ClaimCommunityPoints` only while idle watching, only on the loop's
+  own pick (`watched`, not a drop channel still watched at idle entry) and only with
+  `claim_channel_points` on. A claim counts only when the reply has a `claim` object
+  with a non-empty id and no error; after a failed claim the tick runs
+  `refresh_points()` again, at most `CLAIM_RETRIES` (2) times per watched channel,
+  until the claim succeeds, the read shows no open bonus or the channel changes. A
+  success or a channel change resets the count; after the last retry only
+  `claim-available` retries the claim.
+- Streak share: `shareViewerMilestone` posts a visible notice in the streamer's chat
+  under the user's name, so it is sent with `single_attempt`, and its key (milestone
+  id, count as one int) is used up and saved before sending; when that save fails the
+  share is skipped, not sent. An unknown outcome (no reply, timeout, 5xx, unconfirmed
+  reply, or an auth renewal) is never resent, also not after a restart. Only an
+  `error` with a non-empty string `code` and a null `milestone` allows one more try,
+  also after a restart. A count without a usable value matches any count of the same
+  milestone id. Needs `share_watch_streaks`, which is off by default.
+- The `CommunityPoints` user topic is subscribed at login (`BASE_TOPICS = 3`), so at
+  most 198 channels are tracked, drop and idle channels together. Idle channels over
+  the limit are skipped with a warning.
+- Extra requests while idle watching: the watch loop's per-minute `CurrentDrop` for
+  the watched channel, `ChannelBanStatus` for newly tracked idle channels, and
+  `GetStreamInfo` plus `ChannelPointsContext` again after each hourly reload drops
+  the idle channels (CHANNELS_CLEANUP keeps an online one that streams a wanted game).
+- A listed channel can stream a drops game outside the Mining list: `can_watch()` is
+  False, so it is idle watched, Twitch can credit that game's drops, and the
+  GAMES_UPDATE claim loop and `process_drops` claim them like any claimable drop.
 
 ### Claimed Drop History
 

@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import logging
+import pathlib
 import re
 import time
 from datetime import datetime, timezone
@@ -23,7 +24,7 @@ from src.services.message_handlers import MessageHandlerService
 def fake(cid, broadcast, *, online=True, banned=False, login=None):
     return SimpleNamespace(
         id=cid, login=login or f"c{cid}", online=online, banned=banned, ban_expires_at=None,
-        _stream=SimpleNamespace(broadcast_id=broadcast),
+        broadcast_id=broadcast,
     )
 
 
@@ -38,6 +39,7 @@ def service(channels=None, idle=(), gql=None, visits_path=None):
         _message_handler_service=handlers,
         _channel_service=SimpleNamespace(filter_banned_channels=AsyncMock(side_effect=list)),
     )
+    twitch._add_channel_topics = lambda channels: Twitch._add_channel_topics(twitch, channels)
     return IdleWatchService(twitch, visits_path), twitch
 
 
@@ -183,7 +185,7 @@ async def test_banned_new_channel_is_not_added_and_gets_no_topics():
 def loop_service(live, *, mining=True, idle=("c1",)):
     svc, tw = service(idle=idle)
     tw.is_mining_time = MagicMock(side_effect=lambda: mining() if callable(mining) else mining)
-    tw._auth_state = SimpleNamespace(_logged_in=SimpleNamespace(is_set=lambda: True))
+    tw.logged_in_user_id = lambda: 1
     tw.watching_channel = SimpleNamespace(
         get_with_default=lambda d: tw._watching or d, set=lambda c: setattr(tw, "_watching", c),
     )
@@ -265,8 +267,8 @@ def client_stub(*, flag, mining=True, logged_in=True, idle=("c1",)):
     client._state = State.IDLE
     client._state_change = MagicMock()
     client._idle_watch_allowed = flag
-    client._idle_watch = MagicMock()
-    client._idle_watch.allowed.return_value = mining and logged_in and bool(idle)
+    client.idle_watch = MagicMock()
+    client.idle_watch.allowed.return_value = mining and logged_in and bool(idle)
     client.stop_watching = MagicMock()
     client.watching_channel = SimpleNamespace(get_with_default=lambda d: d)
     client.can_watch = MagicMock(return_value=False)
@@ -277,7 +279,7 @@ def client_stub(*, flag, mining=True, logged_in=True, idle=("c1",)):
 def test_idle_branch_enters_idle_watch_only_when_allowed(flag, ok):
     client = client_stub(flag=flag)
     client._idle_watch_step()
-    assert client._idle_watch.enter.called is ok
+    assert client.idle_watch.enter.called is ok
     assert client.stop_watching.called is (not ok)
 
 
@@ -285,14 +287,14 @@ def test_idle_branch_enters_idle_watch_only_when_allowed(flag, ok):
 def test_idle_branch_stops_when_a_condition_fails(kw):
     client = client_stub(flag=True, **kw)
     client._idle_watch_step()
-    client._idle_watch.enter.assert_not_called()
+    client.idle_watch.enter.assert_not_called()
     client.stop_watching.assert_called_once()
 
 
 def test_leaving_idle_stops_the_loop():
     client = client_stub(flag=True)
     client.change_state(State.INVENTORY_FETCH)
-    client._idle_watch.stop.assert_called_once()
+    client.idle_watch.stop.assert_called_once()
     assert client._idle_watch_allowed is False
     client.change_state(State.IDLE, idle_watch=True)
     assert client._idle_watch_allowed is True
@@ -315,29 +317,29 @@ def test_nothing_to_mine_entries_allow_idle_watch():
 def test_idle_channel_online_event_pokes():
     tw = MagicMock()
     tw.settings.idle_channels = ["c1"]
-    tw._idle_watch.active = True
+    tw.idle_watch.active = True
     tw.watching_channel.get_with_default.return_value = None
     tw.can_watch.return_value = False
     handler = MessageHandlerService(tw)
     listed = SimpleNamespace(login="c1", name="C1", display=MagicMock())
     other = SimpleNamespace(login="zz", name="ZZ", display=MagicMock())
     handler.on_channel_update(listed, None, object())
-    tw._idle_watch.poke.assert_called_once()
+    tw.idle_watch.poke.assert_called_once()
     handler.on_channel_update(other, None, object())
-    tw._idle_watch.poke.assert_called_once()
-    tw._idle_watch.active = False
+    tw.idle_watch.poke.assert_called_once()
+    tw.idle_watch.active = False
     handler.on_channel_update(listed, None, object())
-    tw._idle_watch.poke.assert_called_once()
+    tw.idle_watch.poke.assert_called_once()
 
 
 def test_idle_entry_without_flag_stops_a_running_loop():
     client = client_stub(flag=True)
     client.change_state(State.IDLE)
-    client._idle_watch.stop.assert_called_once()
-    client._idle_watch.stop.reset_mock()
+    client.idle_watch.stop.assert_called_once()
+    client.idle_watch.stop.reset_mock()
     client._idle_watch_allowed = False
     client._idle_watch_step()
-    client._idle_watch.stop.assert_called_once()
+    client.idle_watch.stop.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -381,13 +383,10 @@ async def test_whole_request_failure_is_not_a_skip():
     assert gql.await_count == 2
 
 
-# --- final review fixes ---
-
-
 def handler_twitch(*, active, can_watch=True, should_switch=True, watching=None):
     tw = MagicMock()
     tw.settings.idle_channels = ["c1"]
-    tw._idle_watch.active = active
+    tw.idle_watch.active = active
     tw.watching_channel.get_with_default.return_value = watching
     tw.can_watch.return_value = can_watch
     tw.should_switch.return_value = should_switch
@@ -400,7 +399,7 @@ def stream():
 
 @pytest.mark.parametrize("before", [None, "live"])
 def test_drop_channel_event_while_idle_hands_over_to_channel_switch(before):
-    # RT1a: online, or a title/tag update that makes a channel mineable
+    # online, or a title/tag update that makes a channel mineable
     tw, handler = handler_twitch(active=True, watching=SimpleNamespace(login="c1"))
     drop = SimpleNamespace(login="d", name="D", display=MagicMock())
     handler.on_channel_update(drop, stream() if before else None, stream())
@@ -419,12 +418,12 @@ def test_drop_channel_event_without_idle_watches_directly(before):
 
 @pytest.mark.parametrize("after", [None, "live"])
 def test_idle_watched_channel_offline_or_update_pokes_instead_of_switch(after):
-    # RT4: offline, and a title/tag change of the idle channel that drops cannot use
+    # offline, and a title/tag change of the idle channel that drops cannot use
     idle = SimpleNamespace(login="c1", name="C1", display=MagicMock())
     tw, handler = handler_twitch(active=True, can_watch=False, watching=idle)
     handler.on_channel_update(idle, stream(), stream() if after else None)
     tw.change_state.assert_not_called()
-    tw._idle_watch.poke.assert_called_once()
+    tw.idle_watch.poke.assert_called_once()
     tw, handler = handler_twitch(active=False, can_watch=False, watching=idle)
     handler.on_channel_update(idle, stream(), stream() if after else None)
     tw.change_state.assert_called_once_with(State.CHANNEL_SWITCH)
@@ -434,13 +433,13 @@ def test_idle_watched_channel_becoming_mineable_pokes_the_loop():
     idle = SimpleNamespace(login="c1", name="C1", display=MagicMock())
     tw, handler = handler_twitch(active=True, can_watch=True, watching=idle)
     handler.on_channel_update(idle, stream(), stream())
-    tw._idle_watch.poke.assert_called_once()
+    tw.idle_watch.poke.assert_called_once()
     tw.watch.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_loop_hands_a_mineable_watched_channel_to_drops(monkeypatch, caplog):
-    # RT1b: the loop must not take the watch back from a drop channel
+    # the loop must not take the watch back from a drop channel
     monkeypatch.setattr(idle_mod, "IDLE_TICK_SECONDS", 0.01)
     a, drop = fake(1, 10, login="c1"), fake(9, 90, login="d")
     a.name, drop.name = "A", "D"
@@ -458,7 +457,7 @@ async def test_loop_hands_a_mineable_watched_channel_to_drops(monkeypatch, caplo
 
 
 def test_base_topics_match_the_user_topics_subscribed_at_login():
-    # RT2: every User topic subscribed in _run must be counted in BASE_TOPICS
+    # every User topic subscribed in _run must be counted in BASE_TOPICS
     from src.config import (
         BASE_TOPICS,
         MAX_TOPICS,
@@ -475,24 +474,23 @@ def test_base_topics_match_the_user_topics_subscribed_at_login():
 
 
 def test_idle_list_change_reruns_idle_step_without_games_update():
-    # RT3: the client side of an idle_channels edit
+    # the client side of an idle_channels edit
     client = client_stub(flag=True)
     client._games_update_pending = False
-    client._idle_watch.active = True
+    client.idle_watch.active = True
     client.idle_channels_changed()
     client._state_change.set.assert_called_once()
-    client._idle_watch.poke.assert_called_once()
+    client.idle_watch.poke.assert_called_once()
     assert client._games_update_pending is False
     client = client_stub(flag=False)
     client._state = State.CHANNEL_SWITCH
     client.idle_channels_changed()
     client._state_change.set.assert_not_called()
-    client._idle_watch.poke.assert_not_called()
+    client.idle_watch.poke.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_unexpected_tick_error_is_logged_and_the_loop_continues(monkeypatch, caplog):
-    # RT5
     monkeypatch.setattr(idle_mod, "IDLE_TICK_SECONDS", 0.01)
     a = fake(1, 10)
     a.name = "A"
@@ -513,7 +511,6 @@ async def test_unexpected_tick_error_is_logged_and_the_loop_continues(monkeypatc
 
 @pytest.mark.parametrize("pending", ["inventory", "games"])
 def test_pending_state_activation_stops_idle_watch(pending):
-    # RT7
     client = client_stub(flag=True)
     client.settings = SimpleNamespace(mining_hours={"mode": "always"})
     client._paused = False
@@ -525,13 +522,13 @@ def test_pending_state_activation_stops_idle_watch(pending):
     else:
         client._activate_pending_games_update()
     assert client._state is (State.INVENTORY_FETCH if pending == "inventory" else State.GAMES_UPDATE)
-    client._idle_watch.stop.assert_called_once()
+    client.idle_watch.stop.assert_called_once()
     assert client._idle_watch_allowed is False
 
 
 @pytest.mark.asyncio
 async def test_poke_during_a_tick_is_not_lost(monkeypatch):
-    # RT8: a poke that arrives during track() must run another tick at once
+    # a poke that arrives during track() must run another tick at once
     monkeypatch.setattr(idle_mod, "IDLE_TICK_SECONDS", 5)
     a = fake(1, 10)
     a.name = "A"
@@ -553,7 +550,6 @@ async def test_poke_during_a_tick_is_not_lost(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_idle_start_clears_drop_panel_and_rerun_keeps_idle_status(monkeypatch):
-    # RT9
     monkeypatch.setattr(idle_mod, "IDLE_TICK_SECONDS", 5)
     a = fake(1, 10)
     a.name = "A"
@@ -574,17 +570,16 @@ async def test_idle_start_clears_drop_panel_and_rerun_keeps_idle_status(monkeypa
 def test_idle_branch_rerun_reshows_idle_status():
     client = client_stub(flag=True)
     client._idle_watch_step()
-    client._idle_watch.show_status.assert_called_once()
+    client.idle_watch.show_status.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_authentication_change_drains_idle_task_and_forgets_account_state(tmp_path, monkeypatch):
-    # RT6 and RT10
+async def test_authentication_change_drains_idle_task_and_keeps_account_state(tmp_path, monkeypatch):
     from tests.test_session_lifecycle import miner
 
     client = miner(tmp_path, monkeypatch)
     client.websocket.stop = AsyncMock()
-    svc = client._idle_watch
+    svc = client.idle_watch
     entered, cleaned = asyncio.Event(), asyncio.Event()
 
     async def run():
@@ -604,19 +599,20 @@ async def test_authentication_change_drains_idle_task_and_forgets_account_state(
     svc._skipped.add("x")
     svc._claimed.add("c")
     svc._seen_list = ["x"]
-    (tmp_path / "idle_visits.json").write_text('{"10": 1}', encoding="utf-8")
+    svc._share_tries[("m1", 9)] = idle_mod.STREAK_SHARE_ATTEMPTS
+    (tmp_path / "idle_visits.json").write_text('{"user_id": 1, "visits": {"10": 1}, "shares": []}', encoding="utf-8")
     async with client.authentication_change():
         assert cleaned.is_set() and task.done()
     assert not svc.active
-    assert (svc.balances, svc.visited, svc.visit, svc._skipped, svc._claimed, svc._seen_list) == (
-        {}, {}, None, set(), set(), None,
-    )
-    assert not (tmp_path / "idle_visits.json").exists()  # visits belong to the account
+    assert (svc.balances, svc.visit, svc._skipped, svc._claimed, svc._seen_list) == ({}, None, set(), set(), None)
+    # visits and shares stay with their account: the next idle entry drops them for another one
+    assert svc.visited == {10: 1}
+    assert svc._share_tries == {("m1", 9): idle_mod.STREAK_SHARE_ATTEMPTS}
+    assert (tmp_path / "idle_visits.json").exists()
 
 
 @pytest.mark.asyncio
 async def test_short_batch_reply_skips_unanswered_logins(caplog):
-    # F5
     gql = AsyncMock(return_value=[user(1, "a", live=False)])
     svc, _ = service(idle=["a", "b", "c"], gql=gql)
     with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
@@ -644,14 +640,11 @@ async def test_banned_logins_warn_once(caplog):
     ]
 
 
-# --- second final review fixes (FR) ---
-
-
 def run_service(channels=None, idle=(), gql=None, visits_path=None):
     """A real track()/pick() loop on the fake client, one tick per wait (IDLE_TICK_SECONDS stays 30)."""
     svc, tw = service(channels, idle=idle, gql=gql, visits_path=visits_path)
     tw.is_mining_time = MagicMock(return_value=True)
-    tw._auth_state = SimpleNamespace(_logged_in=SimpleNamespace(is_set=lambda: True))
+    tw.logged_in_user_id = lambda: 1
     tw._watching = None
     tw.watching_channel = SimpleNamespace(get_with_default=lambda d: tw._watching or d)
     tw.watch = MagicMock(side_effect=lambda c, update_status=True: setattr(tw, "_watching", c))
@@ -675,7 +668,7 @@ async def idle_entry(svc, ticks=1):
 
 @pytest.mark.asyncio
 async def test_over_cap_login_warns_once_by_count_and_is_retried_on_the_next_idle_entry(caplog):
-    # FR1: CHANNEL_SWITCH "no channel" keeps the drop channels tracked, so the cap can be full
+    # CHANNEL_SWITCH "no channel" keeps the drop channels tracked, so the cap can be full
     filler = {1000 + i: fake(1000 + i, 1) for i in range(MAX_CHANNELS)}
     gql = AsyncMock(return_value=[user(1, "secretlogin", live=False)])
     svc, tw = run_service(filler, idle=["secretlogin"], gql=gql)
@@ -710,7 +703,7 @@ async def test_lifted_ban_is_retried_on_the_next_idle_entry():
 
 @pytest.mark.asyncio
 async def test_visit_clock_pauses_while_the_loop_is_stopped(monkeypatch):
-    # FR2a: 60 s of a visit, then an hour of drops, must leave 360 s of the visit
+    # 60 s of a visit, then an hour of drops, must leave 360 s of the visit
     now = [1000.0]
     monkeypatch.setattr(idle_mod, "time", SimpleNamespace(monotonic=lambda: now[0]))
     a, b = fake(1, 10, login="c1"), fake(2, 20, login="c2")
@@ -735,7 +728,7 @@ async def test_visit_clock_pauses_while_the_loop_is_stopped(monkeypatch):
 
 
 def test_visits_survive_a_tick_without_live_channels():
-    # FR2b: a failed track() after a full cleanup leaves no live channel for a tick
+    # a failed track() after a full cleanup leaves no live channel for a tick
     svc, _ = service()
     a, b = fake(1, 10), fake(2, 20)
     svc.visited = {10: 1, 20: 2}
@@ -744,15 +737,25 @@ def test_visits_survive_a_tick_without_live_channels():
     assert svc.visit is None  # points watch, not a fresh round of visits
 
 
-def test_channel_missing_for_one_tick_is_not_visited_twice():
-    # FR2c
+def test_a_visit_cut_short_by_a_missing_channel_is_not_recorded():
+    # a failed lookup after the hourly reload leaves the visited channel out of live for a tick
     svc, _ = service()
     a, b = fake(1, 10), fake(2, 20)
     svc.pick([a, b], 0)
-    assert svc.pick([b], 5) is b  # a missing: its visit ends
+    assert svc.pick([b], 5) is b  # a missing: its visit stops, b's starts
+    assert 10 not in svc.visited
     svc.visit.done = True
-    assert svc.pick([a, b], 6) is a
-    assert svc.visit is None  # same broadcast of a: no second visit
+    assert svc.pick([a, b], 6) is a  # same broadcast of a: it gets its full visit
+    assert (svc.visit.channel_id, svc.visit.started) == (1, 6)
+    assert svc.visited == {20: 2}
+    solo, _ = service()
+    assert solo.pick([a], 0) is a
+    assert solo.pick([], 60) is None
+    assert solo.visit is None and solo.visited == {}
+    assert solo.pick([a], 90) is a
+    assert (solo.visit.channel_id, solo.visit.started) == (1, 90)
+    assert solo.pick([a], 90 + IDLE_VISIT_SECONDS) is a
+    assert solo.visit is None and solo.visited == {10: 1}  # finished after its full time
 
 
 def answers_by_login(table):
@@ -767,7 +770,7 @@ def answers_by_login(table):
 
 @pytest.mark.asyncio
 async def test_hard_gql_error_in_a_batch_skips_only_the_failing_login(caplog):
-    # FR3: gql_request raises GQLException for the whole batch on an unrecognised error
+    # gql_request raises GQLException for the whole batch on an unrecognised error
     from src.exceptions import GQLException
 
     gql = answers_by_login({
@@ -824,7 +827,6 @@ async def test_numeric_user_id_is_accepted():
 
 @pytest.mark.asyncio
 async def test_visit_start_is_logged_once_across_loop_restarts(caplog):
-    # FR7
     a = fake(1, 10, login="c1")
     a.name = "A"
     svc, _ = loop_service([a])
@@ -891,21 +893,21 @@ def stopping_client(*, can_watch, active=True):
     idle = SimpleNamespace(id=1, login="c1")
     client.watching_channel = SimpleNamespace(get_with_default=lambda d: idle)
     client.can_watch = MagicMock(return_value=can_watch)
-    client._idle_watch.active = active
+    client.idle_watch.active = active
     return client
 
 
 @pytest.mark.parametrize("state", [State.INVENTORY_FETCH, State.CHANNEL_SWITCH, State.IDLE])
 def test_leaving_idle_watching_releases_the_idle_channel(state):
-    # FR8: otherwise refresh_watched_channel carries it into the CHANNELS_FETCH candidates
+    # otherwise refresh_watched_channel carries it into the CHANNELS_FETCH candidates
     client = stopping_client(can_watch=False)
     client.change_state(state)
-    client._idle_watch.stop.assert_called_once()
+    client.idle_watch.stop.assert_called_once()
     client.stop_watching.assert_called_once()
 
 
 def test_leaving_idle_watching_keeps_a_channel_drops_can_use():
-    # the loop's own handover (RT1) leaves a drop channel watched for CHANNEL_SWITCH
+    # the loop's own handover leaves a drop channel watched for CHANNEL_SWITCH
     client = stopping_client(can_watch=True)
     client.change_state(State.CHANNEL_SWITCH)
     client.stop_watching.assert_not_called()
@@ -989,32 +991,81 @@ async def test_visits_survive_a_restart_and_are_written_on_change_only(tmp_path,
     monkeypatch.setattr(idle_mod, "json_save", lambda *a, **k: (saves.append(a[1]), real_save(*a, **k)))
     a, b = visit_channels()
     svc, _ = run_service({1: a, 2: b}, idle=["a", "b"], visits_path=path)
-    await idle_entry(svc)  # visit of a starts: nothing visited yet
-    assert saves == []
+    await idle_entry(svc)  # visit of a starts: nothing visited yet, the file is bound to the account
+    assert json.loads(path.read_text(encoding="utf-8")) == {"user_id": 1, "visits": {}, "shares": []}
     svc.visit.done = True
     await idle_entry(svc, ticks=3)  # a visited, b's visit runs for three ticks
-    assert json.loads(path.read_text(encoding="utf-8")) == {"10": 1}
-    assert len(saves) == 1
+    assert json.loads(path.read_text(encoding="utf-8")) == {"user_id": 1, "visits": {"10": 1}, "shares": []}
+    assert len(saves) == 2
     restarted, _ = service({1: a, 2: b}, idle=["a", "b"], visits_path=path)
     assert restarted.visited == {10: 1}
     assert restarted.pick([a, b], 0) is b  # a's broadcast is not visited again after the restart
 
 
 @pytest.mark.parametrize("contents", [
-    "not json", "[1, 2]", '{"x": 1}', '{"10": true}', '{"10": "1"}', '{"-1": 1}', bytes([0xFF, 0xFE]),
-])
-def test_corrupt_visits_file_starts_empty_with_one_warning(tmp_path, caplog, contents):
+    "not json", '{"user_id": 1, "visits": {"10": 1}, "sha', "[1, 2]", "null", bytes([0xFF, 0xFE]),
+    '{"visits": []}', '{"visits": {}, "user_id": "1"}', '{"visits": {}, "user_id": true}',
+    '{"visits": {}, "user_id": 0}', '{"visits": {}, "shares": {}}', "permission", "directory",
+    # numbers or nesting Python's parser refuses
+    "huge key", "deep nesting",
+    # without "visits" but with the newer fields it is not the old flat format
+    '{"user_id": 1, "shares": [["m1", 9]]}', '{"Visits": {"10": 1}, "shares": [["m1", 9]]}',
+], ids=repr)
+def test_unreadable_visits_file_is_kept_and_visits_stay_in_memory(tmp_path, monkeypatch, caplog, contents):
     path = tmp_path / "idle_visits.json"
-    if isinstance(contents, bytes):
+    contents = {"huge key": '{"user_id": 1, "visits": {"' + "1" * 5000 + '": 1}, "shares": []}',
+                "deep nesting": "[" * 100000}.get(contents, contents)
+    if contents == "directory":
+        path.mkdir()
+    elif contents == "permission":
+        path.write_text('{"user_id": 1, "visits": {"10": 1}, "shares": []}', encoding="utf-8")
+
+        def denied(self, *args, **kwargs):
+            raise PermissionError("secret path")
+        monkeypatch.setattr(pathlib.Path, "read_text", denied)
+    elif isinstance(contents, bytes):
         path.write_bytes(contents)
     else:
         path.write_text(contents, encoding="utf-8")
+    before = None if path.is_dir() else path.read_bytes()
     with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
         svc, _ = service(visits_path=path)
-    assert svc.visited == {}
-    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert warnings[0].startswith("Idle visits file unreadable (")  # exception type only, no file contents
+        assert svc.visited == {}
+        svc._use_account(1)
+        svc.visited[20] = 2
+        assert svc._save() is False  # not written: the file is left for the owner to fix or delete
+        assert svc._save() is False
+    assert svc.visited == {20: 2}  # in memory, so this run does not revisit the broadcast
+    assert (None if path.is_dir() else path.read_bytes()) == before
+    assert len(caplog.messages) == 1  # once, with the exception type only and no file contents
+    assert caplog.messages[0].startswith("Idle visits file unreadable (")
+    assert "fix or delete" in caplog.messages[0]
+    assert "secret path" not in caplog.text
+
+
+@pytest.mark.parametrize(("contents", "visits", "keys", "skipped"), [
+    # a bad visit next to a good one
+    ('{"user_id": 1, "visits": {"10": 1, "x": 2, "-1": 3, " 12": 4, "13": "5", "14": true}, "shares": [["m1", 9]]}',
+     {10: 1}, {("m1", 9)}, 5),
+    # good shares, a repeated key and a refused one with its try count are not invalid
+    ('{"user_id": 1, "visits": {"10": 1, "x": 2}, "shares": [["m1", 9], ["m7", null], ["m1", 9], ["m5", 9, 1]]}',
+     {10: 1}, {("m1", 9), ("m7", None)}, 1),
+    # the old flat format with a bad entry
+    ('{"10": 1, "x": 2, "11": true}', {10: 1}, set(), 2),
+], ids=["visit", "shares", "flat"])
+def test_malformed_entries_are_skipped_and_the_rest_kept(tmp_path, caplog, contents, visits, keys, skipped):
+    path = tmp_path / "idle_visits.json"
+    path.write_text(contents, encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
+        svc, _ = service(visits_path=path)
+    assert svc.visited == visits
+    assert {key for key, tries in svc._share_tries.items() if tries >= idle_mod.STREAK_SHARE_ATTEMPTS} == keys
+    assert caplog.messages == [f"Idle visits file: {skipped} invalid entries skipped"]
+    svc._use_account(1)
+    svc.visited[20] = 2
+    assert svc._save() is True  # the file is usable: it is rewritten with the valid entries
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["visits"] == {**{str(b): c for b, c in visits.items()}, "20": 2}
 
 
 def test_missing_visits_file_starts_empty_without_a_warning(tmp_path, caplog):
@@ -1024,13 +1075,46 @@ def test_missing_visits_file_starts_empty_without_a_warning(tmp_path, caplog):
     assert caplog.records == []
 
 
-def test_reset_removes_the_visits_file(tmp_path):
+def test_reset_keeps_the_accounts_visits_shares_and_file(tmp_path):
     path = tmp_path / "idle_visits.json"
-    path.write_text('{"10": 1}', encoding="utf-8")
+    path.write_text('{"user_id": 1, "visits": {"10": 1}, "shares": [["m1", 9], ["m2", null]]}', encoding="utf-8")
     svc, _ = service(visits_path=path)
     assert svc.visited == {10: 1}
+    attempts = idle_mod.STREAK_SHARE_ATTEMPTS
+    assert svc._share_tries == {("m1", 9): attempts, ("m2", None): attempts}
     svc.reset()
-    assert svc.visited == {} and not path.exists()
+    assert svc.visited == {10: 1} and path.exists()
+    assert svc._share_tries == {("m1", 9): attempts, ("m2", None): attempts}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("account,kept", [(1, True), (2, False)])
+async def test_visits_and_shares_are_kept_for_their_account_only(tmp_path, account, kept):
+    path = tmp_path / "idle_visits.json"
+    path.write_text('{"user_id": 1, "visits": {"10": 1}, "shares": [["m1", 9]]}', encoding="utf-8")
+    a, b = visit_channels()
+    svc, tw = run_service({1: a, 2: b}, idle=["a", "b"], visits_path=path)
+    tw.logged_in_user_id = lambda: account
+    await idle_entry(svc)
+    assert (10 in svc.visited) is kept
+    assert (("m1", 9) in svc._share_tries) is kept
+    assert tw._watching is (b if kept else a)  # a's broadcast was visited by account 1
+    saved = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    if not kept:
+        assert saved == {"user_id": 2, "visits": {}, "shares": []}
+
+
+@pytest.mark.asyncio
+async def test_a_file_without_an_account_is_taken_by_the_first_account(tmp_path):
+    # files written before the account was stored hold the visits alone
+    path = tmp_path / "idle_visits.json"
+    path.write_text('{"10": 1}', encoding="utf-8")
+    a, b = visit_channels()
+    svc, tw = run_service({1: a, 2: b}, idle=["a", "b"], visits_path=path)
+    assert svc.visited == {10: 1}
+    await idle_entry(svc)
+    assert tw._watching is b
+    assert json.loads(path.read_text(encoding="utf-8")) == {"user_id": 1, "visits": {"10": 1}, "shares": []}
 
 
 def test_visited_stays_bounded_for_channels_that_left_the_list_while_untracked(tmp_path):
@@ -1063,3 +1147,94 @@ async def test_unwritable_visits_file_warns_and_keeps_idle_watching(tmp_path, mo
     assert warnings.count("Idle visits could not be saved (PermissionError)") == 1
     assert "secret path" not in caplog.text
     assert tw._watching is a
+
+
+@pytest.mark.asyncio
+async def test_failed_visits_save_is_retried_until_it_succeeds(tmp_path, monkeypatch, caplog):
+    path = tmp_path / "idle_visits.json"
+    real_save = idle_mod.json_save
+    failures = [PermissionError(), PermissionError()]
+
+    def flaky(*args, **kwargs):
+        if failures:
+            raise failures.pop(0)
+        real_save(*args, **kwargs)
+
+    monkeypatch.setattr(idle_mod, "json_save", flaky)
+    a, b = visit_channels()
+    svc, _ = run_service({1: a, 2: b}, idle=["a", "b"], visits_path=path)
+    svc.visited = {99: 7}
+    with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
+        await idle_entry(svc, ticks=3)
+    assert caplog.messages.count("Idle visits could not be saved (PermissionError)") == 1
+    assert json.loads(path.read_text(encoding="utf-8"))["visits"] == {"99": 7}
+
+
+@pytest.mark.asyncio
+async def test_loop_ends_when_its_pick_can_be_mined():
+    a = fake(1, 10, login="c1")
+    a.name = "A"
+    svc, tw = loop_service([a])
+    tw.can_watch = MagicMock(side_effect=lambda c: c is a)
+    svc.enter()
+    await asyncio.wait_for(svc._task, 1)
+    tw.change_state.assert_called_once_with(State.CHANNEL_SWITCH)
+    tw.watch.assert_not_called()
+    tw.gql_request.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_idle_re_entry_forgets_the_previous_pick_before_the_loop_runs():
+    # the last run handed its pick to drops, which kept watching it; the next entry must not treat it as idle watched
+    a = fake(1, 10, login="c1")
+    a.name = "A"
+    svc, tw = loop_service([a])
+    tw.settings.claim_channel_points = True
+    svc.enter()
+    await asyncio.sleep(0.02)
+    assert svc.watched is a
+    tw.can_watch.return_value = True  # a drop can use a: the running loop hands it over and ends
+    svc.poke()
+    await asyncio.sleep(0.02)
+    assert not svc.active and tw._watching is a and svc.watched is a
+    svc.stop()
+    tw.can_watch.return_value = False
+    tw.gui.status.reset_mock()
+    tw.gql_request.reset_mock()
+    svc.enter()  # CHANNEL_SWITCH found nothing: idle entry, then show_status() before the loop's first step
+    svc.show_status()
+    await svc.process_points(1, {"type": "claim-available", "data": {"claim": {"id": "abc", "channel_id": "1"}}})
+    tw.gui.status.update.assert_not_called()
+    assert not [c for c in tw.gql_request.call_args_list
+                if not isinstance(c.args[0], list) and c.args[0]["operationName"] == "ClaimCommunityPoints"]
+    task = svc.stop()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_hand_over_to_drops_pauses_the_visit_clock(monkeypatch):
+    # 60 s of a visit, a hand-over to drops, idle again 10 minutes later: 360 s of the visit are left
+    now = [1000.0]
+    monkeypatch.setattr(idle_mod, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    a, b = fake(1, 10, login="c1"), fake(2, 20, login="c2")
+    a.name, b.name = "A", "B"
+    svc, tw = loop_service([a, b], idle=("c1", "c2"))
+    svc.enter()
+    await asyncio.sleep(0.02)
+    assert (svc.visit.channel_id, svc.visit.started) == (1, 1000.0)
+    now[0] = 1060.0
+    tw.can_watch.side_effect = lambda c: c is a
+    svc.poke()
+    await asyncio.sleep(0.02)
+    assert not svc.active  # handed over; the client's stop() finds the task done
+    svc.stop()
+    now[0] = 1060.0 + 600
+    tw.can_watch.side_effect = None
+    tw.can_watch.return_value = False
+    svc.enter()
+    await asyncio.sleep(0.02)
+    task = svc.stop()
+    await asyncio.gather(task, return_exceptions=True)
+    assert 10 not in svc.visited
+    assert svc.visit is not None and svc.visit.channel_id == 1
+    assert now[0] - svc.visit.started == 60.0
