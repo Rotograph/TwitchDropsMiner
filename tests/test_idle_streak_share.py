@@ -22,6 +22,7 @@ from src.services.idle_watch import (
     STREAK_SHARE_CHECK_SECONDS,
     IdleWatchService,
 )
+from tests.test_idle_points import POINTS_OPTIONS
 
 
 def milestone(mid="m1", *, category="WATCH_STREAK", state="ACTIVE", share="CAN_SHARE", value="9"):
@@ -63,9 +64,9 @@ def setup(rows=None, *, share=True, active=True, gql=None, online=True, visits_p
     channel = SimpleNamespace(id=123, name="A", login="a", online=online, banned=False)
     tw = SimpleNamespace(
         channels={123: channel},
-        settings=SimpleNamespace(idle_channels=["a"], claim_channel_points=True, share_watch_streaks=share),
+        settings=SimpleNamespace(**POINTS_OPTIONS, idle_channels=["a"], claim_channel_points=True, share_watch_streaks=share),
         gql_request=gql or make_gql([read(rows if rows is not None else [milestone()])]),
-        gui=SimpleNamespace(status=MagicMock()),
+        gui=SimpleNamespace(points=MagicMock(), status=MagicMock()),
         watching_channel=SimpleNamespace(get_with_default=lambda d: channel),
         can_watch=MagicMock(return_value=False),
         is_mining_time=MagicMock(return_value=True),
@@ -217,6 +218,7 @@ async def test_tick_runs_the_check_only_while_the_loop_is_active():
     svc, tw = setup(active=False)
     svc.track = AsyncMock()
     svc.pick = MagicMock(return_value=None)
+    svc._reader = SimpleNamespace(read_due=AsyncMock())  # the points read has its own tests
     tw.stop_watching = MagicMock()
     await svc._tick()
     assert tw.gql_request.call_count == 0
@@ -259,7 +261,7 @@ async def test_one_share_attempt_sends_the_mutation_once(monkeypatch, caplog, me
     with caplog.at_level(logging.WARNING, logger="TwitchDrops"):
         await svc.share_streaks()
     assert len(sent_shares(browser)) == 1
-    assert caplog.messages == ["Twitch request ShareViewerMilestone failed (GQLException)"]
+    assert caplog.messages == ["Twitch request ShareViewerMilestone failed (GQLServerError)"]
     # the outcome is unknown, so later checks do not send it again
     for _ in range(2):
         svc._share_checked -= STREAK_SHARE_CHECK_SECONDS

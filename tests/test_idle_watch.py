@@ -19,6 +19,7 @@ from src.services import idle_watch as idle_mod
 from src.services.channel_service import ChannelService
 from src.services.idle_watch import IDLE_VISIT_SECONDS, RESTART_SECONDS, IdleWatchService
 from src.services.message_handlers import MessageHandlerService
+from tests.test_idle_points import POINTS_OPTIONS
 
 
 def fake(cid, broadcast, *, online=True, banned=False, login=None):
@@ -32,9 +33,9 @@ def service(channels=None, idle=(), gql=None, visits_path=None):
     handlers = SimpleNamespace(process_stream_state=object(), process_stream_update=object())
     twitch = SimpleNamespace(
         channels=dict(channels or {}),
-        settings=SimpleNamespace(idle_channels=list(idle), share_watch_streaks=False),
+        settings=SimpleNamespace(**POINTS_OPTIONS, idle_channels=list(idle), share_watch_streaks=False),
         gql_request=gql or AsyncMock(),
-        gui=SimpleNamespace(channels=MagicMock(), login=MagicMock()),
+        gui=SimpleNamespace(points=MagicMock(), channels=MagicMock(), login=MagicMock()),
         websocket=MagicMock(),
         _message_handler_service=handlers,
         _channel_service=SimpleNamespace(filter_banned_channels=AsyncMock(side_effect=list)),
@@ -272,6 +273,7 @@ def client_stub(*, flag, mining=True, logged_in=True, idle=("c1",)):
     client.stop_watching = MagicMock()
     client.watching_channel = SimpleNamespace(get_with_default=lambda d: d)
     client.can_watch = MagicMock(return_value=False)
+    client.gui = MagicMock()
     return client
 
 
@@ -481,12 +483,14 @@ def test_idle_list_change_reruns_idle_step_without_games_update():
     client.idle_channels_changed()
     client._state_change.set.assert_called_once()
     client.idle_watch.poke.assert_called_once()
+    client.idle_watch.settings_changed.assert_called_once()
     assert client._games_update_pending is False
     client = client_stub(flag=False)
     client._state = State.CHANNEL_SWITCH
     client.idle_channels_changed()
     client._state_change.set.assert_not_called()
     client.idle_watch.poke.assert_not_called()
+    client.idle_watch.settings_changed.assert_called_once()  # the chat refusal, also while drops are mined
 
 
 @pytest.mark.asyncio
@@ -1006,7 +1010,7 @@ async def test_points_request_reraises_exit_request():
 
     svc, _ = service(gql=AsyncMock(side_effect=ExitRequest()))
     with pytest.raises(ExitRequest):
-        await svc._gql(idle_mod.GQL_OPERATIONS["ChannelPointsContext"].with_variables({"channelLogin": "a"}))
+        await svc.gql(idle_mod.GQL_OPERATIONS["ChannelPointsContext"].with_variables({"channelLogin": "a"}))
 
 
 def test_idle_watch_logs_keep_their_module_name_in_diagnostics():

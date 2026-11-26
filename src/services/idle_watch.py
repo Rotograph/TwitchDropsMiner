@@ -1,8 +1,9 @@
 """
 Idle watch service: when nothing can be mined, watch the channels the owner lists.
 
-Each live listed channel gets one streak visit per broadcast, otherwise the highest
-live listed channel is watched for channel points.
+Each live listed channel gets one streak visit per broadcast (and up to RECOVERY_VISITS more
+when a full visit got no streak bonus), otherwise the first live listed channel in priority
+order is watched for channel points.
 """
 
 from __future__ import annotations
@@ -22,6 +23,10 @@ from src.config import GQL_OPERATIONS, MAX_CHANNELS, GQLRawQuery, State
 from src.exceptions import ExitRequest, GQLException, MinerException
 from src.i18n import _
 from src.models.channel import Channel
+from src.services.chat_presence import ChatPresence
+from src.services.idle_points import PointsReader, WatchPriority
+from src.services.points_common import error_code
+from src.services.points_events import PointsEvents
 from src.utils import chunk, json_save, task_wrapper
 
 
@@ -47,6 +52,9 @@ CLAIM_RETRIES = 2
 STREAK_SHARE_CHECK_SECONDS = 300
 STREAK_SHARE_ATTEMPTS = 2
 STREAK_SHARE_TIMEOUT = 30
+# extra visits in the same broadcast after a full visit without the streak bonus, and their spacing
+RECOVERY_VISITS = 2
+RECOVERY_GAP_SECONDS = 600
 # visits kept (and saved); twice the idle list's 20-login cap, oldest dropped first
 IDLE_VISITS_KEPT = 40
 # share keys saved (used up, or refused with their try count), oldest dropped first; a streak's
@@ -69,6 +77,7 @@ class Visit:
     broadcast_id: int
     started: float
     done: bool = False
+    recovery: bool = False
 
 
 class IdleWatchService:
@@ -109,6 +118,17 @@ class IdleWatchService:
         self._ban_ends: dict[str, float] = {}
         self._seen_list: list[str] | None = None
         self.balances: dict[int, int] = {}
+        # channel id -> factors of the active points multipliers (subscriptions), from the last points read
+        self.multipliers: dict[int, tuple[float, ...]] = {}
+        # runtime only, like the drop pause: idle watching and its points actions stop until resumed
+        self.points_paused = False
+        self._reader = PointsReader(twitch, self)
+        # event topics with raids, moments and predictions, and the chat of the watched channel
+        self.events = PointsEvents(twitch, self)
+        self._chat = ChatPresence(twitch, self)
+        # broadcast id -> (channel id, recovery visits started, when the last visit ended) for broadcasts
+        # whose full visit got no streak bonus; in memory only
+        self._recovery: dict[int, tuple[int, int, float]] = {}
         # claim ids claimed on the channel being watched; cleared when it changes
         self._claimed: set[str] = set()
         # claim ids with a request in flight, so a repeated message does not send twice
@@ -134,7 +154,21 @@ class IdleWatchService:
             tw.is_mining_time()
             and tw.logged_in_user_id() is not None
             and bool(tw.settings.idle_channels)
+            and not self.points_paused
         )
+
+    def set_points_paused(self, paused: bool) -> None:
+        """Pause or resume idle watching and its points actions until resumed or restarted.
+
+        Drop mining is untouched: the IDLE step re-runs only while nothing is mined.
+        """
+        if paused == self.points_paused:
+            return
+        self.points_paused = paused
+        logger.info("Channel points %s", "paused" if paused else "resumed")
+        self._twitch.gui.points.paused_changed(paused)
+        # the IDLE step stops the loop and its watch (or starts it again); a running loop is poked too
+        self._twitch.idle_channels_changed()
 
     def enter(self) -> None:
         if not self.active:
@@ -144,6 +178,9 @@ class IdleWatchService:
             self._claim_failed = False
             self._claim_retries = 0
             self._task = asyncio.create_task(self._run())
+            # the points tab shows whether the loop runs, also after it ended by itself
+            self._task.add_done_callback(lambda _task: self._twitch.gui.points.refresh())
+            self._twitch.gui.points.refresh()
 
     def stop(self) -> asyncio.Task[None] | None:
         """Cancel the loop and return its task, so a caller can await the cancellation."""
@@ -151,7 +188,14 @@ class IdleWatchService:
         if task is not None and not task.done():
             self._pause()
             task.cancel()
+        # right away, not when the task ends: the next state may need the topic room
+        self._end_events()
         return task
+
+    def _end_events(self) -> None:
+        """Unsubscribe the event topics, drop open predictions and leave the chat."""
+        self.events.clear()
+        self._chat.leave()
 
     def _pause(self) -> None:
         # the first stop wins: later stop() calls while already down must not shrink the gap
@@ -168,6 +212,11 @@ class IdleWatchService:
         self._last_visit = None
         self._paused_at = None
         self.balances.clear()
+        self.multipliers.clear()
+        self._reader.reset()
+        self.events.reset()
+        self._chat.reset()
+        self._twitch.gui.points.clear()
         self._claimed.clear()
         self._claim_failed = False
         self._claim_retries = 0
@@ -179,6 +228,10 @@ class IdleWatchService:
 
     def poke(self) -> None:
         self._wake.set()
+
+    def settings_changed(self) -> None:
+        """An idle option was saved; also while drops are mined and the loop does not run."""
+        self._chat.settings_changed()
 
     def _load(self) -> None:
         """Read the saved account, visits and share keys; a missing file is empty, bad visit entries are skipped.
@@ -276,6 +329,7 @@ class IdleWatchService:
             self._share_tries.clear()
             self._seen.clear()
             self._finished.clear()
+            self._recovery.clear()
         self._account = account
 
     def show_status(self) -> None:
@@ -296,6 +350,16 @@ class IdleWatchService:
         if self._paused_at is not None and self.visit is not None:
             self.visit.started += time.monotonic() - self._paused_at
         self._paused_at = None
+        try:
+            await self._loop()
+        finally:
+            # a loop that ends by itself (pause, handover, mining hours) drops its events too; one
+            # replaced by a new run after stop() leaves the new run's events alone
+            if self._task is None or self._task is asyncio.current_task():
+                self._end_events()
+
+    async def _loop(self) -> None:
+        tw = self._twitch
         while True:
             # cleared before the awaits, so a poke during the tick runs one more tick
             self._wake.clear()
@@ -339,7 +403,8 @@ class IdleWatchService:
         except (MinerException, aiohttp.ClientError, TimeoutError) as exc:
             # no response body: the exception type is enough to diagnose
             logger.warning("Idle channel lookup failed (%s), retrying", type(exc).__name__)
-        channel = self.pick(self.live_channels(), time.monotonic())
+        live, now = self.live_channels(), time.monotonic()
+        channel = self.pick(live, now)
         self._save()
         if self._hand_to_drops(channel):
             # no watch, balance read or claim on a channel drops can use
@@ -348,7 +413,10 @@ class IdleWatchService:
             if self._last_visit is not None:
                 logger.info("Idle visit ended: broadcast %s", self._last_visit.broadcast_id)
             if self.visit is not None:
-                logger.info("Idle visit started: %s", channel.name if channel else "?")
+                name = channel.name if channel else "?"
+                logger.info("Idle %svisit started: %s", "recovery " if self.visit.recovery else "", name)
+                key = "recovery_visit_started" if self.visit.recovery else "visit_started"
+                self._twitch.gui.points.log(key, channel=name)
             self._last_visit = self.visit
         if channel is None:
             self.watched = None
@@ -372,7 +440,12 @@ class IdleWatchService:
             # the last bonus claim failed: a fresh read finds the bonus again, once per tick
             self._claim_retries += 1
             await self.refresh_points(channel)
+        self.events.sync()
+        watched = self.watched
+        self._chat.follow(watched if watched is not None and self.may_act(watched, "join_chat") else None)
+        await self._reader.read_due(live, now)
         await self.share_streaks()
+        self._twitch.gui.points.refresh()
         return False
 
     def _show_status(self, channel: Channel) -> None:
@@ -383,7 +456,7 @@ class IdleWatchService:
             text = _.t["status"]["idle_watching_points"].format(channel=channel.name, points=points)
         self._twitch.gui.status.update(text)
 
-    def _idle_watched(self, channel_id: object) -> Channel | None:
+    def idle_watched(self, channel_id: object) -> Channel | None:
         """The channel being idle watched, if channel_id is it and the loop is running."""
         watched = self._twitch.watching_channel.get_with_default(None)
         # only the loop's own pick: at idle entry the last drop channel is still watched until the first pick
@@ -392,7 +465,7 @@ class IdleWatchService:
         # a channel drops can use is mined, not idle watched, even before the loop hands it over
         return None if self._twitch.can_watch(watched) else watched
 
-    async def _gql(
+    async def gql(
         self, op: GQLRequest | list[GQLRequest], name: str | None = None,
     ) -> JsonType | Sequence[JsonType | None] | None:
         """Send op (or a batch); failures are logged as one warning without the response body."""
@@ -419,46 +492,43 @@ class IdleWatchService:
         return None
 
     async def claim(self, channel: Channel, claim_id: str) -> None:
+        """Claim a bonus on a listed channel while the loop runs; only the watched channel's failure is retried."""
         tw = self._twitch
+        watched = channel is self.watched
+        # the guards of every points action: also no claim on an offline or banned listed channel, like
+        # every other action (the points read covers live channels only anyway)
         if (
             not claim_id
-            or not tw.settings.claim_channel_points
-            # paused, outside mining hours, or a channel drops can use: no claim
-            or not tw.is_mining_time()
-            or tw.can_watch(channel)
             or claim_id in self._claimed
             or claim_id in self._claiming
+            or not self.may_act(channel, "claim_channel_points")
         ):
             return
         self._claiming.add(claim_id)
         try:
-            response = await self._gql(GQL_OPERATIONS["ClaimCommunityPoints"].with_variables(
+            response = await self.gql(GQL_OPERATIONS["ClaimCommunityPoints"].with_variables(
                 {"input": {"claimID": claim_id, "channelID": str(channel.id)}},
             ))
         finally:
             self._claiming.discard(claim_id)
-        # a failed claim stays unclaimed: the next tick reads the points again and retries it
-        self._claim_failed = True
+        # a failed claim stays unclaimed: the next tick reads the watched channel's points again and
+        # retries it; another channel's open bonus is found again by the next points read
+        self._claim_failed = self._claim_failed or watched
         if response is None:
             return
-        try:
-            result = response["data"]["claimCommunityPoints"]
-            error = result.get("error") if isinstance(result, dict) else True
-        except (KeyError, TypeError):
-            result, error = None, True
-        claim = result.get("claim") if isinstance(result, dict) else None
-        if error is not None or not isinstance(claim, dict) or not isinstance(claim.get("id"), str) or not claim["id"]:
+        code = error_code(response, "claimCommunityPoints")
+        # no error: the field is an object
+        claim = response["data"]["claimCommunityPoints"].get("claim") if code is None else None  # type: ignore[index,call-overload]
+        if not isinstance(claim, dict) or not isinstance(claim.get("id"), str) or not claim["id"]:
             # an error code (for example an already claimed bonus) or no claim with an id instead of the claim
-            code = error.get("code") if isinstance(error, dict) else error
-            logger.warning(
-                "Twitch request ClaimCommunityPoints was not accepted%s",
-                f" ({code})" if isinstance(code, str) else "",
-            )
+            logger.warning("Twitch request ClaimCommunityPoints was not accepted (%s)", code or "no claim")
             return
-        self._claim_failed = False
-        self._claim_retries = 0
+        if watched:
+            self._claim_failed = False
+            self._claim_retries = 0
         self._claimed.add(claim_id)
         logger.info("Claimed channel points bonus on %s", channel.name)
+        tw.gui.points.log("bonus_claimed", channel=channel.name)
 
     async def refresh_points(self, channel: Channel) -> None:
         """Read the balance of a newly watched channel and claim a bonus that is already open."""
@@ -466,22 +536,39 @@ class IdleWatchService:
             return
         try:
             response = await asyncio.wait_for(
-                self._gql(GQL_OPERATIONS["ChannelPointsContext"].with_variables({"channelLogin": channel.login})),
+                self.gql(GQL_OPERATIONS["ChannelPointsContext"].with_variables({"channelLogin": channel.login})),
                 15,
             )
         except TimeoutError:
             logger.warning("Twitch request ChannelPointsContext timed out")
             return
+        await self.apply_points(channel, response)
+
+    async def apply_points(self, channel: Channel, response: object) -> None:
+        """Take channel's balance, multipliers and open bonus from a ChannelPointsContext answer."""
         try:
-            points = response["data"]["community"]["channel"]["self"]["communityPoints"]  # type: ignore[index]
+            answered = response["data"]["community"]["channel"]  # type: ignore[index]
+            points = answered["self"]["communityPoints"]
             balance, available = points["balance"], points["availableClaim"]
         except (KeyError, TypeError):
             return
-        # this read decides again whether a bonus is open
-        self._claim_failed = False
+        # batch answers pair with channels by position: one that names another channel is skipped
+        if "id" in answered and answered["id"] != str(channel.id):
+            return
+        watched = channel is self.watched
+        if watched:
+            # this read decides again whether a bonus is open
+            self._claim_failed = False
+        multipliers = points.get("activeMultipliers")
+        if isinstance(multipliers, list):
+            self.multipliers[channel.id] = tuple(
+                m["factor"] for m in multipliers if isinstance(m, dict) and type(m.get("factor")) in (int, float)
+            )
         if isinstance(balance, int) and not isinstance(balance, bool):
             self.balances[channel.id] = balance
-            self._show_status(channel)
+            if watched:
+                self._show_status(channel)
+        self._twitch.gui.points.refresh()
         if isinstance(available, dict) and isinstance(available.get("id"), str):
             await self.claim(channel, available["id"])
 
@@ -506,7 +593,7 @@ class IdleWatchService:
         ops: list[GQLRequest] = [
             GQLRawQuery(MILESTONES_QUERY, {"login": c.login}, MILESTONES_OPERATION) for c in live
         ]
-        response = await self._gql(ops, MILESTONES_OPERATION)
+        response = await self.gql(ops, MILESTONES_OPERATION)
         answers = response if isinstance(response, list) else []
         for channel, answer in zip(live, answers, strict=False):
             # at most one share sent per channel per check; the rest wait for the next check
@@ -538,10 +625,19 @@ class IdleWatchService:
 
     def _may_share(self, channel: Channel) -> bool:
         """The check's guards, again right before a mutation: the read and earlier shares take time."""
+        return self.may_act(channel, "share_watch_streaks")
+
+    def may_act(self, channel: Channel, setting: str) -> bool:
+        """Whether a channel points action behind the bool setting may run on channel right now.
+
+        The loop runs, points are not paused, mining time, the option is on, and the channel is
+        listed, live, not banned and not one drops can use.
+        """
         tw = self._twitch
         return (
             self.active
-            and tw.settings.share_watch_streaks
+            and not self.points_paused
+            and getattr(tw.settings, setting) is True
             and channel in self.live_channels()
             # can_watch is False while paused or outside mining hours too
             and tw.is_mining_time()
@@ -579,7 +675,7 @@ class IdleWatchService:
         # session does not replay it after an auth renewal either, so that share is lost, not
         # resent: one lost share beats a double notice.
         op.single_attempt = True
-        response = await self._gql(op)
+        response = await self.gql(op)
         if response is None:
             return True  # _gql logged it
         try:
@@ -598,10 +694,12 @@ class IdleWatchService:
         shared = result.get("milestone") if isinstance(result, dict) and error is None else None
         if not isinstance(shared, dict) or shared.get("id") != milestone_id:
             logger.warning("Watch streak share on %s returned an unexpected reply", channel.name)
-        elif value is None:
-            logger.info("Shared watch streak on %s", channel.name)
         else:
-            logger.info("Shared watch streak on %s (%s streams)", channel.name, value)
+            if value is None:
+                logger.info("Shared watch streak on %s", channel.name)
+            else:
+                logger.info("Shared watch streak on %s (%s streams)", channel.name, value)
+            self._twitch.gui.points.log("streak_shared", channel=channel.name)
         return True
 
     @staticmethod
@@ -646,8 +744,16 @@ class IdleWatchService:
             if not isinstance(claim, dict) or not isinstance(claim.get("id"), str) or not claim["id"]:
                 return
             channel_id = self._channel_id(claim.get("channel_id"))
-            if channel_id is not None and (channel := self._idle_watched(channel_id)) is not None:
+            # any listed channel; claim() refuses it unless may_act() allows the claim there
+            if channel_id is not None and (channel := self.listed(channel_id)) is not None:
                 await self.claim(channel, claim["id"])
+
+    def listed(self, channel_id: str) -> Channel | None:
+        """The tracked channel with this id, if its login is in the idle list."""
+        listed = set(self._twitch.settings.idle_channels)
+        return next(
+            (c for c in self._twitch.channels.values() if str(c.id) == channel_id and c.login in listed), None,
+        )
 
     @staticmethod
     def _channel_id(value: object) -> str | None:
@@ -662,19 +768,29 @@ class IdleWatchService:
             return
         gain, balance = data.get("point_gain"), data.get("balance")
         reason = gain.get("reason_code") if isinstance(gain, dict) else None
-        watched = self._idle_watched(channel_id)
-        listed = {c.login for c in self._twitch.channels.values() if str(c.id) == channel_id}
+        watched = self.idle_watched(channel_id)
+        listed = self.listed(channel_id)
         points = balance.get("balance") if isinstance(balance, dict) else None
-        if isinstance(points, int) and not isinstance(points, bool) and (
-            watched is not None or listed & set(self._twitch.settings.idle_channels)
-        ):
+        if isinstance(points, int) and not isinstance(points, bool) and (watched is not None or listed is not None):
             self.balances[int(channel_id)] = points
             if watched is not None:
                 self._show_status(watched)
+        total = gain.get("total_points") if isinstance(gain, dict) else None
+        if listed is not None and isinstance(reason, str) and type(total) is int:
+            self._twitch.gui.points.gain(listed.login, total, reason)
+            if reason != CLAIM_REASON:
+                # claim() already logged the bonus line
+                # the tab's reason names; an unknown Twitch code stays as sent
+                label = _.t["gui"]["points"]["reasons"].get(reason.lower(), reason)  # type: ignore[attr-defined]
+                self._twitch.gui.points.log("gain", channel=listed.name, points=total, reason=label)
+        else:
+            self._twitch.gui.points.refresh()
         wake = False
-        if reason == STREAK_REASON and listed & set(self._twitch.settings.idle_channels):
+        if reason == STREAK_REASON and listed is not None:
             # the next tick runs the share check; no network work in the websocket handler
             self._share_now = wake = True
+            # the streak counted: no recovery visit for this channel's stream
+            self._recovery = {b: r for b, r in self._recovery.items() if str(r[0]) != channel_id}
         visit = self.visit
         if reason == STREAK_REASON and visit is not None and str(visit.channel_id) == channel_id:
             visit.done = wake = True
@@ -724,11 +840,16 @@ class IdleWatchService:
                 self.visited[broadcast_id] = channel.id
                 self._finished[channel.id] = broadcast_id
                 logger.info("Idle visit skipped: %s restarted its stream", channel.name)
+                self._twitch.gui.points.log("visit_skipped", channel=channel.name)
             self._seen[channel.id] = (broadcast_id, now, channel)
 
     def pick(self, live: list[Channel], now: float) -> Channel | None:
+        settings = self._twitch.settings
         ids = {c.id: self._broadcast_id(c) for c in live}
         self._skip_restarts(live, ids, now)
+        if not settings.idle_streak_first:
+            # no visits: one in progress is dropped unrecorded, so it runs again if visits are turned back on
+            self.visit = None
         visit = self.visit
         if visit is not None:
             if (
@@ -739,8 +860,10 @@ class IdleWatchService:
                 return next(c for c in live if c.id == visit.channel_id)
             # a channel missing from live (offline, or a failed lookup) cut the visit short: not recorded,
             # so the same stream gets its full visit once it is tracked again
-            if visit.done or now - visit.started >= IDLE_VISIT_SECONDS or visit.channel_id in ids:
+            full = now - visit.started >= IDLE_VISIT_SECONDS
+            if visit.done or full or visit.channel_id in ids:
                 self.visited[visit.broadcast_id] = visit.channel_id
+            self._note_recovery(visit, full, now)
             self.visit = None
         # A visit is forgotten only when its channel is live with another broadcast, or is
         # tracked but no longer listed; a channel missing for a tick (or untracked after a
@@ -749,11 +872,34 @@ class IdleWatchService:
         unlisted = {c.id for c in self._twitch.channels.values() if c.login not in listed}
         kept = [(b, cid) for b, cid in self.visited.items() if cid not in unlisted and ids.get(cid, b) == b]
         self.visited = dict(kept[-IDLE_VISITS_KEPT:])
-        for channel in live:
-            if ids[channel.id] not in self.visited:
-                self.visit = Visit(channel.id, ids[channel.id], now)
-                return channel
-        return live[0] if live else None
+        recovery = [(b, r) for b, r in self._recovery.items() if r[0] not in unlisted and ids.get(r[0], b) == b]
+        self._recovery = dict(recovery[-IDLE_VISITS_KEPT:])
+        order = WatchPriority.order(live, settings.idle_priority, self.balances, self.multipliers)
+        if settings.idle_streak_first:
+            for channel in order:
+                if ids[channel.id] not in self.visited:
+                    self.visit = Visit(channel.id, ids[channel.id], now)
+                    return channel
+            if settings.streak_recovery:
+                # only after every first visit
+                for channel in order:
+                    entry = self._recovery.get(ids[channel.id])
+                    if entry is not None and entry[1] < RECOVERY_VISITS and now - entry[2] >= RECOVERY_GAP_SECONDS:
+                        self._recovery[ids[channel.id]] = (channel.id, entry[1] + 1, entry[2])
+                        self.visit = Visit(channel.id, ids[channel.id], now, recovery=True)
+                        return channel
+        return WatchPriority.first(order, self.watched, settings.idle_priority, self.balances)
+
+    def _note_recovery(self, visit: Visit, full: bool, now: float) -> None:
+        """Book an ended visit for streak recovery: a full first visit without the bonus earns recovery visits."""
+        if visit.done:
+            self._recovery.pop(visit.broadcast_id, None)
+        elif visit.recovery:
+            # a recovery visit counts when it starts; its end starts the gap to the next one
+            if (entry := self._recovery.get(visit.broadcast_id)) is not None:
+                self._recovery[visit.broadcast_id] = (entry[0], entry[1], now)
+        elif full:
+            self._recovery[visit.broadcast_id] = (visit.channel_id, 0, now)
 
     def live_channels(self) -> list[Channel]:
         by_login = {c.login: c for c in self._twitch.channels.values()}

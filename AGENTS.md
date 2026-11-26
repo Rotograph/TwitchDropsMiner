@@ -1036,7 +1036,7 @@ login_text = _.t["login"]["status"]["logged_in"]  # Returns "Logged in"
 - **src/config/paths.py** - Path management and Docker environment detection
 - **src/config/client_info.py** - Twitch client info (Client-Id, User-Agent)
 - **src/config/settings.py** - Application settings with JSON persistence
-- **src/exceptions.py** - Custom exceptions (MinerException, ExitRequest, RequestException, RequestInvalid, WebsocketClosed, LoginException, CaptchaRequired, GQLException)
+- **src/exceptions.py** - Custom exceptions (MinerException, ExitRequest, RequestException, RequestInvalid, WebsocketClosed, LoginException, CaptchaRequired, GQLException, GQLServerError)
 - **src/drop_history.py** - Claimed-drop history store (`DropHistory`) with atomic JSON
   persistence, filtering, stats, and CSV export; recorded on every successful drop claim
 - **src/utils/** - Helper utilities (string_utils, json_utils, async_helpers, rate_limiter, backoff)
@@ -1239,7 +1239,7 @@ The application uses a web-based interface accessible via browser:
 
 **web/** - Frontend assets:
 
-- `index.html` - Single-page application layout with tabs (Main, Inventory, History, Settings, Help)
+- `index.html` - Single-page application layout with tabs (Main, Inventory, History, Points, Settings, Help)
   - Settings is split into sub-tabs (General, Mining, Games, Notifications, Account &
     Maintenance): each `.settings-section` lives in exactly one `#settings-panel-*` with a
     matching `[data-settings-tab]` button; `switchSettingsTab()` toggles `hidden`.
@@ -1259,6 +1259,7 @@ The application uses a web-based interface accessible via browser:
 - `status_update` - Status bar changes
 - `console_output` - New log lines
 - `channel_add/update/remove` - Channel list changes
+- `points_update`, `points_paused_update`, `points_output` - Points tab state, the channel points pause and its log lines
 - `drop_progress` - Drop mining progress
 - `campaign_add` - New campaign added
 - `login_required` - Prompt for credentials
@@ -1344,10 +1345,32 @@ with this policy when reviewing proposals or documenting deployment options.
 change stops it and releases its channel. It never claims, shares or watches for
 points while a drop can be mined: a pick that `can_watch()` accepts goes to
 CHANNEL_SWITCH before it is watched. Claims and shares also need `is_mining_time()`.
-Other code reaches the service through the public `Twitch.idle_watch`.
+Other code reaches the service through the public `Twitch.idle_watch`. The channel
+points options (`PointsSettings` in `src/config/settings.py`) are read on each step.
+The dashboard side is the `points` tab (between History and Settings): `#points-tab`
+holds the pause button, the listed channels table, the points log (`#points-log`, fed
+by `points_output` and `initial_state.points.log`), the moved idle channel list, claim
+and share checkboxes (same element ids as before), and the `PointsSettings` controls
+(`#points-setting-<key>`, table `POINTS_SETTINGS` in `app.js`; each saves alone
+through `savePointsSetting()`, number inputs clamp before saving). Static text carries
+`data-points-text="<gui.points key>"` and is set by `translatePoints()`; the strings
+live in `gui.points`, translated in every locale.
 
+- Points pause: `points_paused` is runtime only, like the drop pause. `allowed()`
+  needs it off, and `claim()`, `_may_share()` and the points read check it again.
+  `set_points_paused()` (`POST /api/points/pause`, `{"paused": bool}`, StrictBool)
+  broadcasts `points_paused_update` and re-runs the IDLE step through
+  `Twitch.idle_channels_changed()`, which acts only in IDLE, so drop mining is never
+  touched.
 - Visits: each live listed channel gets one visit of `IDLE_VISIT_SECONDS` per
-  broadcast, then the highest live channel in list order is watched. A visit is
+  broadcast, then the first live channel in priority order is watched.
+  `WatchPriority` (`src/services/idle_points.py`) orders live channels by
+  `idle_priority` for the visits and that pick (stable sort: ties keep list order,
+  unknown balances last, `subscribed` by multiplier sum). For that pick,
+  `WatchPriority.first()` keeps `watched` with `points_low`/`points_high` while it is
+  live and the first channel's balance beats its own by at most `SWITCH_MARGIN` (1000),
+  both balances known, so crossing balances do not switch the watch every tick. With `idle_streak_first` off
+  no visit is made and a visit in progress is dropped unrecorded. A visit is
   recorded only when it is done, ran its time or the broadcast changed; one cut short
   because its channel left the live list starts again. Banned channels are skipped; a
   timed ban is retried when it ends.
@@ -1364,6 +1387,12 @@ Other code reaches the service through the public `Twitch.idle_watch`.
   failed watch, or a stream check after a title change) still counts as seen
   offline at the correction. `_seen` and `_finished` are in memory
   only and cleared on an account switch.
+- Streak recovery (`streak_recovery`): a first visit that ran its full time without
+  `visit.done` books `_recovery[broadcast]`; after every first visit, it gets up to
+  `RECOVERY_VISITS` (2) visits with `Visit.recovery`, `RECOVERY_GAP_SECONDS` (600) from
+  the end of the last one. A recovery visit counts when it starts. A WATCH_STREAK gain
+  on the channel or a done visit ends it; entries are pruned like `visited` and live in
+  memory only.
 - `data/idle_visits.json` holds `user_id`, the finished visits (last
   `IDLE_VISITS_KEPT`) and the share keys (last `IDLE_SHARES_KEPT`): `[id, count]` is
   used up, `[id, count, tries]` was refused and has tries left. An auth
@@ -1375,14 +1404,33 @@ Other code reaches the service through the public `Twitch.idle_watch`.
   entries (one warning with the count). A file that exists but cannot be read or
   parsed as a whole, or has an invalid share entry, sets `_load_failed`: the file is
   never written, its readable visits stay in memory and no share is sent this run.
-- Bonus claim: `ClaimCommunityPoints` only while idle watching, only on the loop's
-  own pick (`watched`, not a drop channel still watched at idle entry) and only with
-  `claim_channel_points` on. A claim counts only when the reply has a `claim` object
-  with a non-empty id and no error; after a failed claim the tick runs
-  `refresh_points()` again, at most `CLAIM_RETRIES` (2) times per watched channel,
-  until the claim succeeds, the read shows no open bonus or the channel changes. A
-  success or a channel change resets the count; after the last retry only
-  `claim-available` retries the claim.
+- Bonus claim: `ClaimCommunityPoints` only when `may_act(channel,
+  "claim_channel_points")` allows it (see the event actions below: loop running, not
+  points-paused, mining time, the channel listed, live, not banned and refused by
+  `can_watch()`); `claim-available` is honoured for any such channel. A claim counts
+  only when the reply has a `claim` object with a non-empty id and a null or missing
+  `error` (`error_code()` in `src/services/points_common.py`, shared with the event
+  actions). Twitch creates a bonus chest only on the channel being watched (by TDM, or
+  by the user in a browser), so on the other listed channels TDM only claims a chest
+  that was left open. Only a failure on the loop's own pick (`watched`) sets `_claim_failed`: the
+  tick then runs `refresh_points()` again, at most `CLAIM_RETRIES` (2) times per
+  watched channel, until the claim succeeds, the read shows no open bonus or the
+  channel changes. A success or a channel change resets the count; after the last
+  retry only `claim-available` retries the claim.
+- Points read: `PointsReader` reads `ChannelPointsContext` for the live listed
+  channels other than `watched` (and not `can_watch()`) in one batch every
+  `POINTS_READ_SECONDS` (300). `apply_points()` (shared with `refresh_points()`) stores
+  `balances` and `multipliers` (factor tuples), skips an answer whose
+  `community.channel.id` names another channel, and claims an open bonus. A failed or
+  partial batch waits for the next read.
+- Points tab state: `PointsManager` (`src/web/managers/points.py`) owns the last gain
+  per login, the points log (`gui.points_log`, a `ConsoleOutputManager` with event
+  `points_output` and no logger echo) and the `points_update` broadcast, sent only when
+  the state changed: `{"paused", "active", "channels": [{"login", "name", "live",
+  "balance", "last_gain": {"points", "reason", "at"} | null}]}`;
+  `initial_state.points` adds `log`. The service calls `gui.points.log(key, **values)`
+  with a `points.log.*` key (translated in every locale) and
+  keeps its English INFO line.
 - Streak share: `shareViewerMilestone` posts a visible notice in the streamer's chat
   under the user's name, so it is sent with `single_attempt`, and its key (milestone
   id, count as one int) is used up and saved before sending; when that save fails the
@@ -1391,10 +1439,78 @@ Other code reaches the service through the public `Twitch.idle_watch`.
   `error` with a non-empty string `code` and a null `milestone` allows one more try,
   also after a restart. A count without a usable value matches any count of the same
   milestone id. Needs `share_watch_streaks`, which is off by default.
+- Event features (`PointsEvents`, `src/services/points_events.py`, owned by the service as
+  `events`): `sync()` runs on every tick and subscribes only the topics of enabled options
+  while the loop runs and points are not paused: `predictions-user-v1.<user>` and
+  `predictions-channel-v1.<id>` (`predictions_enabled`) and
+  `community-moments-channel-v1.<id>` (`claim_moments`) for every live listed channel,
+  `raid.<id>` (`follow_raids`) for `watched` only. A turned-off option, an offline or
+  unlisted channel or a new pick drops its topics on the next tick; `stop()` (right away,
+  so the next state has the room) and the end of `_run` (unless a newer run replaced it)
+  call `_end_events()`, which removes them all, cancels open bet timers and leaves the
+  chat. New topics never take the slots of the stream topics of listed logins not tracked
+  yet (`_room()`); topics that do not fit, or a pool `MinerException`, log
+  `points.log.topic_limit` once until all fit again.
+- Every event action re-checks at send time with `may_act(channel, setting)`: loop
+  active, not points-paused, the bool option on, the channel live in `live_channels()`
+  (listed, not banned), `is_mining_time()` and not `can_watch()`. Raids also need
+  `idle_watched()` (the loop's pick, still watched). Raid, moment and prediction ids are
+  used up before sending (newest `EVENTS_KEPT` kept, cleared on an auth change), so a
+  repeated message, failure or unknown outcome is never resent. `JoinRaid` and
+  `MakePrediction` are `single_attempt`: a top-level GQL error raises `GQLException`
+  when every error names a refusal (Twitch's `IntegrityCheckFailed` on JoinRaid), else
+  `GQLServerError` (a message in `SERVER_ERRORS` of `src/api/gql_client.py`, such as
+  `service timeout`, compared without case and outer spaces; an `error` reply with an int
+  `status` of 500 or more; or no readable message: the mutation may have run), so the log code is the
+  exception type; a nested `data.<field>.error.code` is logged as is. Mutations time out
+  after `MUTATION_TIMEOUT` (30 s). `CommunityMomentCallout_Claim` answers in
+  `claimCommunityMoment`. A raid target is never watched.
+- Predictions (`src/services/predictions.py`): an ACTIVE `event-created`/`event-updated`
+  on a live listed channel starts one timer per event that fires
+  `PREDICTION_DELAY_SECONDS` (6) before `created_at + prediction_window_seconds` (at once
+  when less is left); later updates replace the stored event, so the bet uses the last
+  outcomes. An event is handled once (`_handled`, newest `EVENTS_KEPT`, kept across loop
+  stops and cleared only on an auth change): when its timer fires, when a LOCKED, RESOLVED
+  or CANCELED status arrives (a later ACTIVE gets no bet) and when `predictions-user-v1`
+  sends `prediction-made` for it (the account bet, also from a browser). An update with no
+  usable window starts no timer and does not handle the event, so a later update with a
+  window still does; it logs `bet_skipped` once per event (`_no_window`, cleared with the
+  open events) and only when `may_act(channel, "predictions_enabled")` allows it. Twitch sends `prediction-made` only when the bet is
+  placed, so after a restart or an auth change an open event can get a second bet. When
+  the timer fires it bets only if `may_act`, the stored status is ACTIVE, the balance is
+  known and `PredictionStrategy.amount()` =
+  `min(balance * prediction_percent // 100, prediction_max_points, balance)` is at least
+  `MIN_BET` (10); otherwise `bet_skipped`, except when `may_act` refuses (only an INFO
+  line). The fired event leaves `_latest`. Every sent bet is kept in `_placed` before
+  sending. A reply whose `makePrediction.error` is not null is `bet_failed`, as is a
+  plain `GQLException`; any other send failure (`GQLServerError`, timeout, connection,
+  unconfirmed HTTP reply) is `bet_unknown`. `PredictionStrategy.choose()` needs two outcomes; counts that are not
+  positive ints count as 0; ties keep the first; `smart` takes the two outcomes with the
+  most users (a tie keeps the earlier) and, when `abs(u1 - u2) * 100 / (u1 + u2) <= 20`
+  (no users counts as even), bets the one of the two with fewer points (a tie keeps the
+  earlier), else `most_voted` over all outcomes. Results of sent bets (`prediction-result`
+  WIN/LOSE/REFUND, kept until an auth change) go to the points log while the user topic
+  is subscribed.
+- Chat presence (`ChatPresence`, `src/services/chat_presence.py`, `join_chat`): the tick
+  calls `follow(watched)` when `may_act(watched, "join_chat")`, else `follow(None)`. One
+  aiohttp websocket to `wss://irc-ws.chat.twitch.tv:443` sends only `PASS oauth:<token>`,
+  `NICK <login>`, `JOIN #<channel>` and `PONG`; the login comes from one
+  `currentUser { login }` read per account and must match `[a-z0-9_]{1,25}`. It leaves on
+  a switch or stop by closing the socket, reconnects with `ExponentialBackoff` up to
+  `CHAT_BACKOFF_MAX` (300 s) while still wanted (checked before every connect), and
+  resets the backoff only after a connection stayed up `CHAT_STABLE_SECONDS` (60). 600 s
+  of silence is a lost connection. A `NOTICE *` (refused login) stores `(login, token)`
+  in `_refused`: no connect with that pair again, so only a new token, `reset()` (auth
+  change) or saving `join_chat` off allows the next try (`Twitch.idle_channels_changed()`
+  calls `IdleWatchService.settings_changed()` on every idle option save, also while drops
+  are mined; it clears the refusal while `join_chat` is off). It logs only exception types, never the token or IRC lines.
 - The `CommunityPoints` user topic is subscribed at login (`BASE_TOPICS = 3`), so at
   most 198 channels are tracked, drop and idle channels together. Idle channels over
-  the limit are skipped with a warning.
-- Extra requests while idle watching: the watch loop's per-minute `CurrentDrop` for
+  the limit are skipped with a warning. The event topics above are extra and live only
+  while the loop runs.
+- Extra requests while idle watching: the event mutations above, one `ChatPresenceLogin`
+  read per account when `join_chat` is on, the batched `ChannelPointsContext` read every
+  `POINTS_READ_SECONDS`, the watch loop's per-minute `CurrentDrop` for
   the watched channel, `ChannelBanStatus` for newly tracked idle channels, and
   `GetStreamInfo` plus `ChannelPointsContext` again after each hourly reload drops
   the idle channels (CHANNELS_CLEANUP keeps an online one that streams a wanted game).
