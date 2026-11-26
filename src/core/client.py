@@ -134,7 +134,7 @@ class Twitch:
         self._message_handler_service: MessageHandlerService = MessageHandlerService(self)
         self._inventory_service: InventoryService = InventoryService(self)
         self._watch_service: WatchService = WatchService(self)
-        self.idle_watch: IdleWatchService = IdleWatchService(self, DATA_DIR / "idle_visits.json")
+        self.idle_watch: IdleWatchService = IdleWatchService(self, DATA_DIR / "idle_visits.json", DATA_DIR / "points_history.json")
         self._idle_watch_allowed: bool = False
         self._stream_selector: StreamSelector = StreamSelector()
         # Drop history
@@ -225,11 +225,11 @@ class Twitch:
         self._changing_auth = True
         self._resume_mining.clear()
         try:
-            # The idle loop is its own task, not a child of _run: drain it with the others.
+            # The idle loop and its side watcher are their own tasks, not children of _run: drain them too.
             self._idle_watch_allowed = False
-            idle_task = self.idle_watch.stop()
+            idle_tasks = self.idle_watch.stop_all()
             tasks = [task for task in (self._run_task, self._schedule_task, self._watching_task, self._mnt_task,
-                                       idle_task)
+                                       *idle_tasks)
                      if task is not None and task is not asyncio.current_task()]
             for task in tasks:
                 task.cancel()
@@ -288,6 +288,8 @@ class Twitch:
 
     async def shutdown(self) -> None:
         start_time = time()
+        # the idle loop saves its points history at most once a minute and may not get to its own stop
+        self.idle_watch.save_history()
         self._channel_service.clear_bans()
         self.diagnostics.stop_logs()
         await self.helper.stop()
@@ -333,30 +335,44 @@ class Twitch:
         """Change the current state of the miner.
 
         idle_watch is only honoured for IDLE: it marks "nothing can be mined", so the
-        idle service may watch the owner's listed channels.
+        idle service may watch the owner's listed channels (main mode). Any other state
+        stops main mode; with watch_slots 2, side mode then runs next to drop mining and
+        keeps running across these states.
         """
         if self._state is not State.EXIT:
             # prevent state changing once we switch to exit state
             self._state = state
             self._idle_watch_allowed = idle_watch and state is State.IDLE
             if not self._idle_watch_allowed:
-                was_idle_watching = self.idle_watch.active
-                self.idle_watch.stop()
-                # The stopped loop leaves its idle channel watched; CHANNELS_FETCH would carry it
-                # as a drop candidate. A channel drops can use stays (the loop's own handover).
-                if (
-                    was_idle_watching
-                    and (watching := self.watching_channel.get_with_default(None)) is not None
-                    and not self.can_watch(watching)
-                ):
-                    self.stop_watching()
+                if not (self.idle_watch.active and self.idle_watch.mode == "side"):
+                    was_idle_watching = self.idle_watch.active
+                    self.idle_watch.stop()
+                    # The stopped loop leaves its idle channel watched; CHANNELS_FETCH would carry it
+                    # as a drop candidate. A channel drops can use stays (the loop's own handover).
+                    if (
+                        was_idle_watching
+                        and (watching := self.watching_channel.get_with_default(None)) is not None
+                        and not self.can_watch(watching)
+                    ):
+                        self.stop_watching()
+                self._side_watch_step()
         self._state_change.set()
+
+    def _side_watch_step(self) -> None:
+        """Run idle watching in side mode next to drop mining while it may run (watch_slots 2), else stop side mode."""
+        idle = self.idle_watch
+        if self._state is not State.EXIT and not self._idle_watch_allowed and idle.side_allowed():
+            idle.enter(side=True)
+        elif idle.active and idle.mode == "side":
+            idle.stop()
 
     def idle_channels_changed(self) -> None:
         """Re-run the IDLE step for an edited idle option or the points pause; drop mining needs no games update."""
         self.idle_watch.settings_changed()
         # the points tab lists the idle channels, also while drops are mined
         self.gui.points.refresh()
+        # watch_slots and the points pause start or stop side mode next to drop mining
+        self._side_watch_step()
         if self._state is State.IDLE:
             self._state_change.set()
             if self.idle_watch.active:
@@ -892,8 +908,10 @@ class Twitch:
                 # ensure that we won't end up with more channels than we can handle
                 # NOTE: we trim from the end because that's where the non-priority,
                 # offline (or online but low viewers) channels end up
-                to_remove_channels = ordered_channels[MAX_CHANNELS:]
-                ordered_channels = ordered_channels[:MAX_CHANNELS]
+                # with two watch slots, room stays for the listed channels and their event topics
+                room = min(MAX_CHANNELS, self.idle_watch.drop_channel_room())
+                to_remove_channels = ordered_channels[room:]
+                ordered_channels = ordered_channels[:room]
                 if to_remove_channels:
                     # tracked channels and gui were cleared earlier, so no need to do it here
                     # just make sure to unsubscribe from their topics

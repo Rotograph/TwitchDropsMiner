@@ -41,6 +41,8 @@ default_settings = {
     "share_watch_streaks": False,
     "games_to_watch": [],
     "idle_channels": [],
+    # per-channel overrides of the options below, keyed by a listed login (ChannelOptionSettings)
+    "idle_channel_options": {},
     # channel points options of idle watching (PointsSettings); actions that spend points or are
     # visible to others are off by default
     "idle_priority": "list",
@@ -51,8 +53,17 @@ default_settings = {
     "prediction_strategy": "smart",
     "prediction_percent": 5,
     "prediction_max_points": 1000,
+    "prediction_min_balance": 0,
+    "prediction_min_voters": 0,
+    "prediction_min_odds": 1.0,
+    "prediction_timing": "before_close",
+    "prediction_delay_seconds": 6,
+    "prediction_timer_percent": 50,
+    "prediction_fixed_option": 1,
     "claim_moments": True,
     "join_chat": False,
+    # 2: idle watching also runs next to drop mining, on a second watch (IdleWatchService side mode)
+    "watch_slots": 1,
     "language": DEFAULT_LANG,
     "last_notified_releases": {"telegram": "", "discord": ""},
     "prefer_followed_channels": False,
@@ -115,7 +126,7 @@ class MiningHoursSettings:
 
 
 class IdleChannelSettings:
-    """Validate the channels watched when nothing can be mined."""
+    """Validate the channels watched when nothing can be mined (with watch_slots 2 also next to drops)."""
 
     LOGIN = re.compile(r"[a-z0-9_]{1,25}")
     MAX_CHANNELS = 20
@@ -145,29 +156,43 @@ class PointsSettings:
 
     CHOICES: ClassVar[dict[str, tuple[str, ...]]] = {
         "idle_priority": ("list", "points_low", "points_high", "subscribed"),
-        "prediction_strategy": ("smart", "most_voted", "high_odds", "favourite"),
+        "prediction_strategy": ("smart", "most_voted", "high_odds", "favourite", "fixed"),
+        "prediction_timing": ("before_close", "after_open", "percent"),
     }
     # inclusive bounds; Twitch takes 10..250000 points per prediction
     RANGES: ClassVar[dict[str, tuple[int, int]]] = {
         "prediction_percent": (1, 100),
         "prediction_max_points": (10, 250000),
+        "prediction_min_balance": (0, 10_000_000),
+        "prediction_min_voters": (0, 1_000_000),
+        "prediction_delay_seconds": (0, 3600),
+        "prediction_timer_percent": (1, 99),
+        "prediction_fixed_option": (1, 10),
+        "watch_slots": (1, 2),
     }
+    # inclusive bounds of the options that take an int or a float, kept to two decimals like the dashboard
+    NUMBERS: ClassVar[dict[str, tuple[float, float]]] = {"prediction_min_odds": (1.0, 100.0)}
     FLAGS = ("idle_streak_first", "streak_recovery", "follow_raids", "predictions_enabled", "claim_moments", "join_chat")
-    KEYS = (*CHOICES, *RANGES, *FLAGS)
+    KEYS = (*CHOICES, *RANGES, *NUMBERS, *FLAGS)
 
     @classmethod
     def normalize(cls, key: str, value: Any) -> Any:
-        """Return value when it is valid for key; a bool is never an int here."""
+        """Return value when it is valid for key (a NUMBERS value rounded to 2 decimals); a bool is never an int here."""
         if key in cls.CHOICES:
             valid = type(value) is str and value in cls.CHOICES[key]
         elif key in cls.RANGES:
             low, high = cls.RANGES[key]
             valid = type(value) is int and low <= value <= high
+        elif key in cls.NUMBERS:
+            floor, ceiling = cls.NUMBERS[key]
+            # a NaN fails both comparisons
+            valid = type(value) in (int, float) and floor <= value <= ceiling
         else:
             valid = key in cls.FLAGS and type(value) is bool
         if not valid:
             raise ValueError(f"invalid_{key}")
-        return value
+        # a float: merge_json would replace a saved int with the float default
+        return round(float(value), 2) if key in cls.NUMBERS else value
 
     @classmethod
     def salvage(cls, settings: dict[str, Any]) -> None:
@@ -176,12 +201,76 @@ class PointsSettings:
             if key not in settings:
                 continue
             try:
-                cls.normalize(key, settings[key])
+                settings[key] = cls.normalize(key, settings[key])
             except ValueError:
                 default = default_settings[key]
                 settings[key] = default
                 shown = ("on" if default else "off") if isinstance(default, bool) else default
                 logger.warning("Ignoring invalid %s in settings; using the default (%s)", key, shown)
+
+
+class ChannelOptionSettings:
+    """Validate the per-channel options of idle watching: {login: {option: value}}."""
+
+    # option key -> the global setting it overrides
+    OVERRIDES: ClassVar[dict[str, str]] = {
+        "bonus": "claim_channel_points",
+        "raids": "follow_raids",
+        "moments": "claim_moments",
+        "predictions": "predictions_enabled",
+        "streaks": "idle_streak_first",
+        "chat": "join_chat",
+    }
+    FLAGS = (*OVERRIDES, "favorite", "streak_only")
+    LIMIT = (1, 100_000_000)
+    KEYS = (*FLAGS, "points_limit")
+
+    @classmethod
+    def _valid(cls, key: str, value: Any) -> bool:
+        if key in cls.FLAGS:
+            return type(value) is bool
+        return key == "points_limit" and type(value) is int and cls.LIMIT[0] <= value <= cls.LIMIT[1]
+
+    @classmethod
+    def normalize(cls, value: Any) -> dict[str, dict[str, Any]]:
+        """Return value when it is valid; an empty per-channel object is left out."""
+        if type(value) is not dict:
+            raise ValueError("invalid_idle_channel_options")
+        result: dict[str, dict[str, Any]] = {}
+        for login, options in value.items():
+            if (
+                type(login) is not str
+                or IdleChannelSettings.LOGIN.fullmatch(login) is None
+                or type(options) is not dict
+                or any(key not in cls.KEYS or not cls._valid(key, item) for key, item in options.items())
+            ):
+                raise ValueError("invalid_idle_channel_options")
+            if options:
+                result[login] = dict(options)
+        return result
+
+    @classmethod
+    def prune(cls, options: dict[str, dict[str, Any]], logins: list[str]) -> dict[str, dict[str, Any]]:
+        """Only the options of listed logins."""
+        return {login: item for login, item in options.items() if login in logins}
+
+    @classmethod
+    def salvage(cls, value: Any) -> tuple[dict[str, dict[str, Any]], int]:
+        """Keep the valid options of a hand-edited value; the second item counts the dropped ones."""
+        if type(value) is not dict:
+            return {}, 1
+        kept: dict[str, dict[str, Any]] = {}
+        dropped = 0
+        for login, options in value.items():
+            for key, item in options.items() if type(options) is dict else ():
+                try:
+                    cls.normalize({login: {key: item}})
+                except ValueError:
+                    dropped += 1
+                else:
+                    kept.setdefault(login, {})[key] = item
+            dropped += type(options) is not dict
+        return kept, dropped
 
 
 class NotificationEventSettings:
@@ -242,6 +331,7 @@ class Settings:
     share_watch_streaks: bool
     games_to_watch: list[str]
     idle_channels: list[str]
+    idle_channel_options: dict[str, dict[str, Any]]
     idle_priority: str
     idle_streak_first: bool
     streak_recovery: bool
@@ -250,8 +340,16 @@ class Settings:
     prediction_strategy: str
     prediction_percent: int
     prediction_max_points: int
+    prediction_min_balance: int
+    prediction_min_voters: int
+    prediction_min_odds: float
+    prediction_timing: str
+    prediction_delay_seconds: int
+    prediction_timer_percent: int
+    prediction_fixed_option: int
     claim_moments: bool
     join_chat: bool
+    watch_slots: int
     language: str
     last_notified_releases: dict[str, str]
     reward_priority: list[str]
@@ -292,6 +390,15 @@ class Settings:
             settings["idle_channels"] = kept
             # the count only: channel names stay out of the logs
             logger.warning("Ignoring invalid idle_channels entries in settings; kept %d channels", len(kept))
+        try:
+            options = ChannelOptionSettings.normalize(settings.get("idle_channel_options", {}))
+        except ValueError:
+            options, dropped = ChannelOptionSettings.salvage(settings.get("idle_channel_options"))
+            logger.warning("Ignoring %d invalid idle_channel_options entries in settings", dropped)
+        # options of a login that is not listed are dropped without a warning, like a removed channel
+        options = ChannelOptionSettings.prune(options, cast(list[str], settings["idle_channels"]))
+        # merge_json would strip the login keys, which no template can list: it gets the default {}
+        settings.pop("idle_channel_options", None)
         if not isinstance(settings.get("claim_channel_points", True), bool):
             # merge_json below replaces the wrong type with the default (on)
             logger.warning("Ignoring invalid claim_channel_points in settings; using the default (on)")
@@ -315,6 +422,7 @@ class Settings:
                 logger.warning(f"{key} {value!r} is outside {low}-{high}, clamping")
                 settings[key] = min(max(value, low), high)
         merge_json(settings, default_settings)
+        settings["idle_channel_options"] = options
         settings.pop("allow_helper_connection", None)
         for key, value in settings.items():
             if value is URL:
@@ -329,8 +437,11 @@ class Settings:
         self.reward_priority = RewardPriority.normalize(self.reward_priority)
         self.mining_hours = MiningHoursSettings.normalize(self.mining_hours)
         self.idle_channels = IdleChannelSettings.normalize(self.idle_channels)
+        self.idle_channel_options = ChannelOptionSettings.prune(
+            ChannelOptionSettings.normalize(self.idle_channel_options), self.idle_channels,
+        )
         for key in PointsSettings.KEYS:
-            PointsSettings.normalize(key, getattr(self, key))
+            setattr(self, key, PointsSettings.normalize(key, getattr(self, key)))
         self.drop_name_blacklist = DropIgnorePolicy.normalize_keywords(
             self.drop_name_blacklist
         )

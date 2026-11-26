@@ -14,16 +14,26 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, StrictBool, StrictInt, ValidationInfo, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    ValidationInfo,
+    field_validator,
+)
 
 from src.config.paths import DATA_DIR
 from src.config.reward_priority import RewardPriority
 from src.config.settings import (
+    ChannelOptionSettings,
     IdleChannelSettings,
     InventoryFilterSettings,
     MiningHoursSettings,
     PointsSettings,
 )
+from src.services.follow_import import FollowImporter, FollowImportError
 from src.services.game_order import TemporaryGameOrder
 from src.version import __version__
 from src.web.auth import AuthAPI, AuthMiddleware, AuthSocketServer, WebAuth
@@ -96,6 +106,7 @@ class SettingsUpdate(BaseModel):
     prefer_followed_channels: StrictBool | None = None
     reward_priority: list[str] | None = None
     idle_channels: list[str] | None = None
+    idle_channel_options: dict | None = None
     claim_channel_points: StrictBool | None = None
     share_watch_streaks: StrictBool | None = None
     idle_priority: str | None = None
@@ -106,8 +117,16 @@ class SettingsUpdate(BaseModel):
     prediction_strategy: str | None = None
     prediction_percent: StrictInt | None = None
     prediction_max_points: StrictInt | None = None
+    prediction_min_balance: StrictInt | None = None
+    prediction_min_voters: StrictInt | None = None
+    prediction_min_odds: StrictInt | StrictFloat | None = None
+    prediction_timing: str | None = None
+    prediction_delay_seconds: StrictInt | None = None
+    prediction_timer_percent: StrictInt | None = None
+    prediction_fixed_option: StrictInt | None = None
     claim_moments: StrictBool | None = None
     join_chat: StrictBool | None = None
+    watch_slots: StrictInt | None = None
     proxy: str | None = None
     connection_quality: StrictInt | None = Field(default=None, ge=1, le=6)
     minimum_refresh_interval_minutes: StrictInt | None = Field(default=None, ge=1, le=1440)
@@ -130,6 +149,11 @@ class SettingsUpdate(BaseModel):
     @classmethod
     def validate_idle_channels(cls, value: list[str] | None) -> list[str] | None:
         return IdleChannelSettings.normalize(value) if value is not None else None
+
+    @field_validator("idle_channel_options")
+    @classmethod
+    def validate_idle_channel_options(cls, value: dict | None) -> dict | None:
+        return ChannelOptionSettings.normalize(value) if value is not None else None
 
     @field_validator(*PointsSettings.KEYS)
     @classmethod
@@ -568,6 +592,34 @@ async def update_points_paused(request: PointsPauseRequest):
 
     twitch_client.idle_watch.set_points_paused(request.paused)
     return {"success": True, "paused": twitch_client.idle_watch.points_paused}
+
+
+@app.post("/api/points/import-follows")
+async def import_follows():
+    """Append the channels the account follows to the idle list, up to the cap of 20."""
+    if not twitch_client or not gui_manager:
+        raise HTTPException(status_code=503, detail="Twitch client not initialized")
+    if twitch_client.logged_in_user_id() is None:
+        raise HTTPException(status_code=409, detail="not_logged_in")
+
+    importer = FollowImporter(twitch_client)
+    try:
+        followed = await importer.fetch()
+    except FollowImportError:
+        raise HTTPException(status_code=502, detail="follows_unavailable") from None
+    # merged after the reads: the list may have changed while they ran
+    current = list(twitch_client.settings.idle_channels)
+    merged, counts = importer.merge(current, followed)
+    if merged != current:
+        try:
+            gui_manager.settings.update_settings({"idle_channels": merged})
+        except Exception:
+            raise HTTPException(status_code=500, detail="settings_save_failed") from None
+    logger.info(
+        "Followed channels import: %d added, %d already listed, %d over the limit",
+        counts["added"], counts["already_listed"], counts["over_limit"],
+    )
+    return {"success": True, **counts}
 
 
 @app.post("/api/wanted-order")

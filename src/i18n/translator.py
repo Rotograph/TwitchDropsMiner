@@ -470,6 +470,7 @@ class GUIPointsReasons(TypedDict):
     watch_streak: str
     raid: str
     prediction: str
+    other: str
 
 
 class GUIPoints(TypedDict):
@@ -508,6 +509,11 @@ class GUIPoints(TypedDict):
     claim_moments_help: str
     join_chat: str
     join_chat_help: str
+    watch_slots: str
+    watch_slots_one: str
+    watch_slots_two: str
+    watch_slots_help: str
+    side_watching: str
     predictions_header: str
     predictions_enabled: str
     predictions_enabled_help: str
@@ -517,10 +523,59 @@ class GUIPoints(TypedDict):
     strategy_most_voted: str
     strategy_high_odds: str
     strategy_favourite: str
+    strategy_fixed: str
+    prediction_fixed_option: str
+    prediction_fixed_option_help: str
     prediction_percent: str
     prediction_percent_help: str
     prediction_max_points: str
     prediction_max_points_help: str
+    prediction_min_balance: str
+    prediction_min_balance_help: str
+    prediction_min_voters: str
+    prediction_min_voters_help: str
+    prediction_min_odds: str
+    prediction_min_odds_help: str
+    prediction_timing: str
+    prediction_timing_help: str
+    timing_before_close: str
+    timing_after_open: str
+    timing_percent: str
+    prediction_delay_seconds: str
+    prediction_delay_seconds_help: str
+    prediction_timer_percent: str
+    prediction_timer_percent_help: str
+    channel_options: str
+    channel_options_marker: str
+    channel_options_save_error: str
+    option_default_on: str
+    option_default_off: str
+    option_on: str
+    option_off: str
+    opt_bonus: str
+    opt_raids: str
+    opt_moments: str
+    opt_predictions: str
+    opt_streaks: str
+    opt_chat: str
+    opt_favorite: str
+    opt_streak_only: str
+    opt_points_limit: str
+    import_follows: str
+    import_follows_result: str
+    import_follows_error: str
+    import_follows_login: str
+    history_header: str
+    history_channel: str
+    history_empty: str
+    history_chart: str
+    history_col_source: str
+    history_col_points: str
+    history_bets: str
+    history_bet_won: str
+    history_bet_lost: str
+    history_bet_refunded: str
+    history_bet_points_won: str
     reasons: GUIPointsReasons
 
 

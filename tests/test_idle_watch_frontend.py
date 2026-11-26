@@ -14,17 +14,25 @@ from tests.test_telegram_frontend import run_javascript
 
 ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend tests")
+APP_JS = (ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
+# the constants of the per-channel options, which the extracted functions read
+OPTION_CONSTANTS = APP_JS[APP_JS.index("const CHANNEL_OPTION_FEATURES"):APP_JS.index("let followImportBusy") + len("let followImportBusy = false;")]
+POINTS_SETTINGS_JS = re.search(r"const POINTS_SETTINGS = \{.*?\n\};", APP_JS, re.S).group(0)
 IDLE_FUNCTIONS = ["makeElement", "renderIdleChannels", "saveIdleChannels", "addIdleChannel",
-                  "handleDragStart", "handleDragOver", "dragOverRows", "pointerPastMiddle", "handleDrop"]
+                  "handleDragStart", "handleDragOver", "dragOverRows", "pointerPastMiddle", "handleDrop",
+                  "globalChannelOption", "findOption", "readChannelOptions", "sortedJson", "labelled",
+                  "buildChannelOptionsPanel", "withQueuedOptions", "saveChannelOptions", "importFollows"]
 
 # REWARD_DOM supplies the fake DOM; add the idle controls and the state the functions read.
-IDLE_DOM = REWARD_DOM + r"""
+IDLE_DOM = REWARD_DOM + POINTS_SETTINGS_JS + OPTION_CONSTANTS + r"""
 for (const id of ['idle-channels-title', 'idle-channels-help', 'idle-channels-list', 'idle-channel-input',
                   'idle-channel-add', 'idle-channels-error'])
     root.appendChild(Object.assign(new Node(id === 'idle-channel-input' ? 'input' : 'div'), {id}));
 let idleChannelsSaving = false;
 const idleChannelPattern = /^[a-z0-9_]{1,25}$/;
 const idleChannelLimit = 20;
+for (const id of ['idle-import-btn', 'idle-import-status'])
+    root.appendChild(Object.assign(new Node(id === 'idle-import-btn' ? 'button' : 'p'), {id}));
 Object.assign(state.translations.gui.settings, {idle_channels_save_error: 'Idle save failed',
     idle_channels_remove: 'Remove {channel}', idle_channels_up: 'Up {channel}', idle_channels_down: 'Down {channel}'});
 state.settings.idle_channels = ['alpha', 'beta', 'gamma'];
@@ -61,7 +69,8 @@ renderIdleChannels();
 const row = rowOf('beta');
 assert.ok(row.classes.has('sortable-item'));
 assert.equal(row.draggable, true);
-const [handle, number, name, up, down, remove] = row.children;
+const [handle, number, name, toggle, up, down, remove] = row.children;
+assert.ok(toggle.attrs['aria-label'] === 'Options of beta' && toggle.attrs['aria-expanded'] === 'false');
 assert.ok(handle.classes.has('drag-handle') && handle.attrs['aria-hidden'] === 'true');
 assert.ok(number.classes.has('priority-number'));
 assert.equal(number.textContent, '2');
@@ -349,4 +358,45 @@ updateSettingsUI({prefer_followed_channels: true}, false, ['prefer_followed_chan
 assert.deepEqual(state.settings.idle_channels, ['alpha', 'beta']);
 updateSettingsUI({idle_channels: ['gamma']}, true);  // an authoritative reply replaces it
 assert.deepEqual(state.settings.idle_channels, ['gamma']);
+""")
+
+
+def test_a_later_successful_queued_save_hides_the_error():
+    run_idle(r"""
+state.settings.idle_channel_options = {};
+let calls = 0, release;
+global.fetch = async (url, options) => {
+    calls += 1;
+    if (calls === 1) { await new Promise(resolve => { release = resolve; }); return {ok: false}; }
+    const sent = JSON.parse(options.body).idle_channel_options;
+    return {ok: true, json: async () => ({success: true, settings: {idle_channel_options: sent}})};
+};
+const first = saveChannelOptions('alpha', {favorite: true});
+await tick();
+await saveChannelOptions('beta', {favorite: true});  // queued behind the first
+release();
+assert.equal(await first, true);
+assert.equal(calls, 2);
+assert.equal(error().hidden, true);
+""")
+
+
+def test_the_change_in_flight_survives_a_rerender_until_the_reply():
+    run_idle(r"""
+state.settings.idle_channel_options = {};
+let release, sent = [];
+global.fetch = async (url, options) => {
+    sent.push(JSON.parse(options.body).idle_channel_options);
+    if (sent.length === 1) await new Promise(resolve => { release = resolve; });
+    const body = sent[sent.length - 1];
+    return {ok: true, json: async () => ({success: true, settings: {idle_channel_options: body}})};
+};
+const first = saveChannelOptions('alpha', {favorite: true});
+await tick();
+assert.deepEqual(withQueuedOptions(state.settings.idle_channel_options), {alpha: {favorite: true}});
+await saveChannelOptions('beta', {favorite: true});
+release();
+await first;
+assert.deepEqual(sent[1], {alpha: {favorite: true}, beta: {favorite: true}});
+assert.deepEqual(withQueuedOptions({}), {});  // nothing stays after the replies
 """)

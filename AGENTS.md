@@ -164,7 +164,7 @@ lang/                # Translation JSON files (20 languages)
 - `WatchService`: Drop mining watch payload logic
 - `MaintenanceService`: Periodic maintenance tasks
 - `MessageHandlerService`: Websocket message routing and handling
-- `IdleWatchService`: Watches the owner's idle channels for streaks and channel points when nothing can be mined
+- `IdleWatchService`: Watches the owner's idle channels for streaks and channel points when nothing can be mined with one slot; with `watch_slots` 2 also next to drop mining, on a second watch
 
 
 **src/models/channel.py** - Channel and Stream:
@@ -565,7 +565,7 @@ progress to an ignored drop while the miner intentionally targets another reward
 6. **CHANNEL_SWITCH** - Select best channel to watch based on priority/ACL
 7. Loop between CHANNEL_SWITCH and periodic INVENTORY_FETCH (hourly)
 
-Only the two "nothing to mine" IDLE entries (`change_state(State.IDLE, idle_watch=True)`: no campaigns, and no channel in CHANNEL_SWITCH) start idle watching. Leaving IDLE must go through `change_state`, never a bare `self._state` assignment, so the idle loop stops and releases its channel.
+Only the two "nothing to mine" IDLE entries (`change_state(State.IDLE, idle_watch=True)`: no campaigns, and no channel in CHANNEL_SWITCH) start idle watching. Leaving IDLE must go through `change_state`, never a bare `self._state` assignment, so the idle loop stops and releases its channel. With `watch_slots` 2, `change_state` then runs `_side_watch_step()`, which starts idle watching in side mode next to drop mining (see Idle Watching).
 
 ### Authentication and integrated browser login
 
@@ -1329,22 +1329,23 @@ with this policy when reviewing proposals or documenting deployment options.
 - ✅ Docker deployment - containerized on the user's own home hardware
 - ✅ Remote access - access to the user's home-hosted instance
 - ✅ Headless operation - no display server required
-- ✅ Idle watching - watches the user's listed channels when nothing can be mined
+- ✅ Idle watching - watches the user's listed channels when nothing can be mined, and with two watch slots also next to drop mining
 
 **NOT supported:**
 
 - Multi-account support
-- Channel points mining while a drop can be mined, or on channels the user did not list
+- Channel points mining while a drop can be mined with one slot, on a channel drops can use or with drops on, or on channels the user did not list
 - Desktop GUI
 
 ### Idle Watching
 
 `IdleWatchService` (`src/services/idle_watch.py`) watches the channels in the
 `idle_channels` setting (lowercase logins, at most 20, validated by
-`IdleChannelSettings`) only after the two "nothing to mine" IDLE entries; any state
-change stops it and releases its channel. It never claims, shares or watches for
-points while a drop can be mined: a pick that `can_watch()` accepts goes to
-CHANNEL_SWITCH before it is watched. Claims and shares also need `is_mining_time()`.
+`IdleChannelSettings`). In main mode (one slot, `watch_slots` 1) it runs only after
+the two "nothing to mine" IDLE entries; any state change stops it and releases its
+channel. With one slot it never claims, shares or watches for points while a drop can
+be mined, and in both modes never on a channel drops can use: in main mode a pick that
+`can_watch()` accepts goes to CHANNEL_SWITCH before it is watched. Claims and shares also need `is_mining_time()`.
 Other code reaches the service through the public `Twitch.idle_watch`. The channel
 points options (`PointsSettings` in `src/config/settings.py`) are read on each step.
 The dashboard side is the `points` tab (between History and Settings): `#points-tab`
@@ -1360,8 +1361,54 @@ live in `gui.points`, translated in every locale.
   needs it off, and `claim()`, `_may_share()` and the points read check it again.
   `set_points_paused()` (`POST /api/points/pause`, `{"paused": bool}`, StrictBool)
   broadcasts `points_paused_update` and re-runs the IDLE step through
-  `Twitch.idle_channels_changed()`, which acts only in IDLE, so drop mining is never
-  touched.
+  `Twitch.idle_channels_changed()`, which acts only in IDLE (and starts or stops side
+  mode), so drop mining is never touched.
+- Side mode (`watch_slots` 2, `PointsSettings.RANGES` 1 to 2, validated like the other
+  points settings in `PointsSettings`, the API model and `SettingsManager`): idle
+  watching also runs while drops are mined. `Twitch._side_watch_step()` (called by
+  `change_state` for every state but EXIT and IDLE with `idle_watch`, and by
+  `idle_channels_changed()`) calls `enter(side=True)` while `side_allowed()` holds
+  (`allowed()`, `watch_slots == 2`, no auth change running), else stops side mode.
+  `change_state` leaves a running side loop alone; `enter()` in the other mode stops the
+  loop first, so the IDLE step's `enter()` ends side mode (and its watcher) before main
+  mode watches, and `stop()` ends both. The visit clock pauses across the switch like
+  any stop. `side_allowed()` is also False in `SIDE_PAUSE_STATES` (GAMES_UPDATE,
+  CHANNELS_CLEANUP, CHANNELS_FETCH), so side mode pauses while drop mining rebuilds its
+  channel list: no `track()` then, its event topics go, and it resumes after
+  CHANNELS_FETCH. A pause in those states keeps the side pick (`_side_pick`); the
+  resumed loop continues that watch (also on a re-created object with the same channel
+  id) without a start line, claim reset or points read. With 2 slots, CHANNELS_FETCH
+  keeps at most `drop_channel_room()` drop channels: `(MAX_TOPICS -
+  PointsEvents.most_topics(n)) // TOPICS_PER_CHANNEL - n` for n listed logins (157 for
+  20), so the listed channels, their stream topics and every event topic fit the pool;
+  with 1 slot it stays `MAX_CHANNELS`. Side candidates (`side_candidate()`) are live
+  listed channels with `drops_enabled` False (A1: the AvailableDrops check of
+  `track()`), not `can_watch()`, not `watching_channel` (by id), and whose broadcast has
+  an AvailableDrops answer with an empty or null `viewerDropCampaigns`: any campaign,
+  earnable or not, may be credited drop progress that the drop code does not track.
+  `track()` reads it for a new live channel (`_check_drops()`, one `fetch_drop_campaigns()`
+  that sets the drops flag and seeds the answer); `_read_side_drops()` reads it per
+  broadcast in the side tick (inside `private_gql_discovery`), again after
+  `SIDE_DROPS_REFRESH_SECONDS` (15 minutes), keeps the newest `SIDE_DROPS_KEPT` (40)
+  answers with their read time (cleared by `reset()`), and leaves a failed read
+  unknown: no candidate, retried after `SIDE_DROPS_RETRY_SECONDS` (2 minutes), one
+  WARNING per failing streak. `pick()` runs over the candidates only and `may_act` also needs
+  one, so visits, recovery, priority, per-channel options, claims, shares, raids,
+  moments, predictions and chat work unchanged on them. The pick goes to the side
+  watcher (`_side_watch`, one task, `side_channel`), never to `Twitch.watch`: it calls
+  `send_watch(side=True)` every `SIDE_WATCH_SECONDS` (10) and ends on offline, ban, end
+  of mining time or when the channel is no longer a candidate, then pokes the loop; a
+  new pick cancels the old watcher first. Side mode compares channels by id: the watcher
+  follows `side_channel` while it keeps the id, and a tick that finds a new object for
+  the side pick adopts it. `Channel._watch_current(stream, side=True)` accepts only a
+  `side_channel` with its id while `watching_channel` has another id, and the drop watch
+  loop never passes `side`, so a side channel never reaches drop progress,
+  `record_watch`, `picked_channel_id` or `gui.channels.set_watching`. Side mode never
+  hands a channel to drops (`_hand_to_drops` is main mode only), does not touch the
+  status line or the drop panel, and the Points row of `side_channel` has `"side": true`
+  ("Watching (second slot)"). It doubles the video requests (playlist, segment HEADs,
+  spade) and has not run live: whether Twitch credits points and drop progress for two
+  concurrent watches is unverified.
 - Visits: each live listed channel gets one visit of `IDLE_VISIT_SECONDS` per
   broadcast, then the first live channel in priority order is watched.
   `WatchPriority` (`src/services/idle_points.py`) orders live channels by
@@ -1427,10 +1474,76 @@ live in `gui.points`, translated in every locale.
   per login, the points log (`gui.points_log`, a `ConsoleOutputManager` with event
   `points_output` and no logger echo) and the `points_update` broadcast, sent only when
   the state changed: `{"paused", "active", "channels": [{"login", "name", "live",
-  "balance", "last_gain": {"points", "reason", "at"} | null}]}`;
+  "balance", "last_gain": {"points", "reason", "at"} | null, "side"}]}` (`side`: the
+  channel side mode watches);
   `initial_state.points` adds `log`. The service calls `gui.points.log(key, **values)`
   with a `points.log.*` key (translated in every locale) and
   keeps its English INFO line.
+- Points history (`PointsHistory`, `src/services/points_history.py`, owned by the service
+  as `history`): `data/points_history.json`, `{"version": 1, "user_id", "channels":
+  {"<channel id>": {"login", "samples": [[unix seconds, balance]], "gains": {category:
+  points}, "bets": {"won", "lost", "refunded", "points_won"}}}}`, written like
+  `idle_visits.json` (one account: `use_account()` clears it for another one; a file that
+  cannot be read, parsed or has a wrong top level, version or `user_id` is never
+  overwritten, one warning with the exception type only, recording continues in memory;
+  bad channel entries are skipped with a count). Bounds: 288 samples per channel, 20
+  channels, channels not in `idle_channels` dropped at `save()`. A sample is added by
+  `IdleWatchService.record_balance()` when a listed channel's balance changes (the
+  `points-earned` message and `apply_points()`): unchanged is skipped, one in the
+  same 5-minute slot (`time // 300`) as the last sample updates its balance and keeps
+  its time, so there is one sample per slot. Gains: each `points-earned` of a listed channel adds `total_points` to `watch`
+  (any reason containing WATCH), `bonus` (CLAIM), `raid`, `streak` (WATCH_STREAK) or
+  `other`; a reason containing PREDICTION adds nothing (the result message counts it).
+  `bet` and the bet counts come from `Predictions.process_result()` for bets TDM placed
+  (`_placed` keeps the stake): `bet` is the net (WIN `points_won - stake`, LOSE
+  `-stake`, REFUND 0; the only gain that may be negative), `bets.points_won` the gross
+  payout. `save()` runs from the idle tick, only when changed and at most once a minute;
+  `save_history()` forces it (still never over a damaged file) at the end of every loop
+  run and from `Twitch.shutdown()`. A failed write is retried with one warning per
+  failing streak. The dashboard gets `initial_state.points.history`
+  and a `points_history` message (`{"channels": {id: entry}}`) from
+  `PointsManager.refresh_history()`, at most once a minute and on an account change; the
+  History section of the Points tab (`renderPointsHistory()`) draws an inline SVG chart.
+- Per-channel options (`idle_channel_options`, `ChannelOptionSettings` in
+  `src/config/settings.py`): `{login: {option: value}}`, only for logins in
+  `idle_channels`. Feature options `bonus`, `raids`, `moments`, `predictions`, `streaks`
+  and `chat` are bools that replace `claim_channel_points`, `follow_raids`,
+  `claim_moments`, `predictions_enabled`, `idle_streak_first` and `join_chat` for that
+  channel (`ChannelOptionSettings.OVERRIDES`); `favorite` and `streak_only` are bools and
+  `points_limit` is an int of 1 to 100000000. Types are strict (a bool is no int), unknown
+  keys are rejected by the API and dropped with a count-only warning on load, and an
+  empty per-channel object is never stored. Options of a login not in `idle_channels` are
+  dropped on load, in `Settings.save()` and in `SettingsManager.update_settings()`, so
+  removing a channel removes its options. `merge_json` strips unknown keys, so `load()`
+  sets the options aside and puts them back after the merge. One gate:
+  `IdleWatchService.option(channel, setting)` gives the effective value and `may_act()`
+  and `pick()` use it; `_may_share()` and the share check skip a channel whose own
+  `streaks` option is False (`_streaks_off()`); without that override the share follows
+  `share_watch_streaks` alone, whatever the global `idle_streak_first`. `pick()` runs visits and recovery only on channels whose effective `streaks`
+  is on (a per-channel on beats a global off) and drops a visit in progress when its
+  channel turns visits off. `WatchPriority.order()` puts `favorite` logins first and keeps
+  the mode's order inside both groups; `WatchPriority.stayable()` removes `streak_only`
+  channels and channels whose known balance is at or above `points_limit` (unknown counts
+  as below) before `first()`, so with none left idle watching watches nothing. The Points
+  tab row has an options button (`aria-expanded`, `renderIdleChannels()` builds the panel
+  with `buildChannelOptionsPanel()`), saves the whole object through
+  `saveChannelOptions()` and rolls back on failure. Strings are in `gui.points`.
+  Tests: `tests/test_channel_options.py`, `tests/test_channel_options_frontend.py`.
+- Import of followed channels: `POST /api/points/import-follows` (dashboard auth and
+  origin checks like the other points routes) needs a logged-in account (409
+  `not_logged_in`). `FollowImporter` (`src/services/follow_import.py`) reads the
+  `ChannelFollows` persisted query (variables `limit` 100, `order` ASC, `cursor`) inside
+  `private_gql_discovery()`, at most 20 pages, ending on `hasNextPage` false, an empty page
+  or a last edge without a cursor, each page bounded to 30 seconds. A failed or malformed
+  page is 502 `follows_unavailable` and changes nothing. Logins are checked as ASCII before
+  `lower()`, matched with `IdleChannelSettings.LOGIN`, deduplicated, skipped when listed,
+  and appended up to `MAX_CHANNELS`; the list is saved through
+  `SettingsManager.update_settings()`, so validation, the broadcast and
+  `on_idle_channels_change` run. The reply is `{"success": true, "added", "already_listed",
+  "over_limit"}`; past 20 pages `over_limit` counts only the pages read. Never log a follow
+  login, not even at DEBUG; log the three counts only. The hash and variables have only run
+  against mocks (an anonymous probe returns `user` null, so the hash is known). Tests:
+  `tests/test_follow_import.py`.
 - Streak share: `shareViewerMilestone` posts a visible notice in the streamer's chat
   under the user's name, so it is sent with `single_attempt`, and its key (milestone
   id, count as one int) is used up and saved before sending; when that save fails the
@@ -1440,11 +1553,14 @@ live in `gui.points`, translated in every locale.
   also after a restart. A count without a usable value matches any count of the same
   milestone id. Needs `share_watch_streaks`, which is off by default.
 - Event features (`PointsEvents`, `src/services/points_events.py`, owned by the service as
-  `events`): `sync()` runs on every tick and subscribes only the topics of enabled options
-  while the loop runs and points are not paused: `predictions-user-v1.<user>` and
-  `predictions-channel-v1.<id>` (`predictions_enabled`) and
+  `events`): `sync()` runs on every tick and subscribes only the topics of options that are
+  on for the channel (`option()`: its override, else the global setting) while the loop runs
+  and points are not paused: `predictions-channel-v1.<id>` (`predictions_enabled`) and
   `community-moments-channel-v1.<id>` (`claim_moments`) for every live listed channel,
-  `raid.<id>` (`follow_raids`) for `watched` only. A turned-off option, an offline or
+  `predictions-user-v1.<user>` while any of them has predictions on or a sent bet has no
+  result yet (`Predictions.open_bets`, kept until the result, an account change or a
+  restart, refused bets included), and
+  `raid.<id>` (`follow_raids`) for `watched` only (the side channel in side mode). A turned-off option, an offline or
   unlisted channel or a new pick drops its topics on the next tick; `stop()` (right away,
   so the next state has the room) and the end of `_run` (unless a newer run replaced it)
   call `_end_events()`, which removes them all, cancels open bet timers and leaves the
@@ -1453,7 +1569,8 @@ live in `gui.points`, translated in every locale.
   `points.log.topic_limit` once until all fit again.
 - Every event action re-checks at send time with `may_act(channel, setting)`: loop
   active, not points-paused, the bool option on, the channel live in `live_channels()`
-  (listed, not banned), `is_mining_time()` and not `can_watch()`. Raids also need
+  (listed, not banned), `is_mining_time()`, not `can_watch()` and in side mode
+  `side_candidate()`. Raids also need
   `idle_watched()` (the loop's pick, still watched). Raid, moment and prediction ids are
   used up before sending (newest `EVENTS_KEPT` kept, cleared on an auth change), so a
   repeated message, failure or unknown outcome is never resent. `JoinRaid`,
@@ -1467,10 +1584,16 @@ live in `gui.points`, translated in every locale.
   after `MUTATION_TIMEOUT` (30 s). `CommunityMomentCallout_Claim` answers in
   `claimCommunityMoment`. A raid target is never watched.
 - Predictions (`src/services/predictions.py`): an ACTIVE `event-created`/`event-updated`
-  on a live listed channel starts one timer per event that fires
-  `PREDICTION_DELAY_SECONDS` (6) before `created_at + prediction_window_seconds` (at once
-  when less is left); later updates replace the stored event, so the bet uses the last
-  outcomes. An event is handled once (`_handled`, newest `EVENTS_KEPT`, kept across loop
+  on a live listed channel starts one timer per event. `Predictions._delay(event, timing,
+  seconds, percent)` gives the fire time from `created_at` (start) and
+  `prediction_window_seconds` (window), by `prediction_timing`: `before_close` (default)
+  start + window - `prediction_delay_seconds` (6), `after_open` start +
+  `prediction_delay_seconds`, `percent` start + window * `prediction_timer_percent` / 100
+  (50). Every mode is clamped to at most start + window - 1 s and at least now. The timing
+  settings are read when the timer is armed (the first ACTIVE update); a settings change
+  does not move an armed timer. Later updates replace the stored event, so the bet uses
+  the last outcomes. Every mode fires through the same `bet()`, which pops `_latest` and
+  marks the event handled before sending, so each mode sends at most one bet. An event is handled once (`_handled`, newest `EVENTS_KEPT`, kept across loop
   stops and cleared only on an auth change): when its timer fires, when a LOCKED, RESOLVED
   or CANCELED status arrives (a later ACTIVE gets no bet) and when `predictions-user-v1`
   sends `prediction-made` for it (the account bet, also from a browser). An update with no
@@ -1481,7 +1604,18 @@ live in `gui.points`, translated in every locale.
   the timer fires it bets only if `may_act`, the stored status is ACTIVE, the balance is
   known and `PredictionStrategy.amount()` =
   `min(balance * prediction_percent // 100, prediction_max_points, balance)` is at least
-  `MIN_BET` (10); otherwise `bet_skipped`, except when `may_act` refuses (only an INFO
+  `MIN_BET` (10); the filters of the latest event data also hold, checked in `_refusal` in
+  this order: `prediction_min_balance` (balance below it: "balance below minimum"),
+  `prediction_min_voters` (sum of `total_users` over all outcomes: "too few voters", 0 is
+  off), the strategy (`fixed` bets outcome number `prediction_fixed_option`, 1-based in
+  Twitch's order, "option N not offered" when there are fewer; a single outcome is "fewer
+  than two outcomes") and `prediction_min_odds` (odds = all points over the chosen
+  outcome's points; an outcome without points is infinite when the total is above 0 and
+  unknown when it is 0; with a minimum above 1.0 the odds must be known and at least the
+  minimum: "odds unknown" or "odds below minimum"; 1.0 never blocks). Bad counts count as
+  0. `prediction_min_odds` is the only float option, stored as a float rounded to 2
+  decimals by `PointsSettings.normalize()` (load, API, manager and save), and accepts an int or a float, not a
+  bool; otherwise `bet_skipped`, except when `may_act` refuses (only an INFO
   line). The fired event leaves `_latest`. Every sent bet is kept in `_placed` before
   sending. A reply whose `makePrediction.error` is not null is `bet_failed`, as is a
   plain `GQLException`; any other send failure (`GQLServerError`, timeout, connection,
@@ -1512,9 +1646,24 @@ live in `gui.points`, translated in every locale.
 - Extra requests while idle watching: the event mutations above, one `ChatPresenceLogin`
   read per account when `join_chat` is on, the batched `ChannelPointsContext` read every
   `POINTS_READ_SECONDS`, the watch loop's per-minute `CurrentDrop` for
-  the watched channel, `ChannelBanStatus` for newly tracked idle channels, and
+  the watched channel, `ChannelBanStatus` and (when live) `AvailableDrops` for newly
+  tracked idle channels, `AvailableDrops` on each later stream check of those, and
   `GetStreamInfo` plus `ChannelPointsContext` again after each hourly reload drops
   the idle channels (CHANNELS_CLEANUP keeps an online one that streams a wanted game).
+- Drops flag: `track()` creates new listed channels with `verify_drops=True` and sets the
+  flag of a live one from `fetch_drops_enabled()` (inside `private_gql_discovery`), so
+  `can_watch()` and the hand-over to drops see only a campaign this account can earn. A
+  failed read sets False (one WARNING per `track()` with the exception type): a real
+  drop channel is still found by CHANNELS_FETCH. Channels already tracked are reused
+  unchanged. Every later stream check of a `verify_drops` channel (idle and followed
+  channels) reads AvailableDrops within `DROPS_READ_TIMEOUT`; a failed read keeps the rest
+  of the check (live state, game), the same broadcast keeps its last checked flag and a new
+  broadcast gets False, so a failed drops read alone neither hides a stream going live nor
+  gives a new broadcast the default True (a GetStreamInfo slower than the outer
+  `STREAM_CHECK_TIMEOUT` still fails the whole check, as before). A failed read sets
+  `Channel.drops_unverified` (also in `track()`), and each `viewcount` event of such a
+  live channel calls `check_online()` again until a read succeeds; the WARNING is logged
+  once per failing streak.
 - A listed channel can stream a drops game outside the Mining list: `can_watch()` is
   False, so it is idle watched, Twitch can credit that game's drops, and the
   GAMES_UPDATE claim loop and `process_drops` claim them like any claimable drop.
