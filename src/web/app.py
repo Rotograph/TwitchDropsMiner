@@ -27,6 +27,8 @@ from pydantic import (
 from src.config.paths import DATA_DIR
 from src.config.reward_priority import RewardPriority
 from src.config.settings import (
+    CONNECTION_QUALITY_RANGE,
+    REFRESH_INTERVAL_MINUTES_RANGE,
     ChannelOptionSettings,
     IdleChannelSettings,
     InventoryFilterSettings,
@@ -128,8 +130,12 @@ class SettingsUpdate(BaseModel):
     join_chat: StrictBool | None = None
     watch_slots: StrictInt | None = None
     proxy: str | None = None
-    connection_quality: StrictInt | None = Field(default=None, ge=1, le=6)
-    minimum_refresh_interval_minutes: StrictInt | None = Field(default=None, ge=1, le=1440)
+    connection_quality: StrictInt | None = Field(
+        default=None, ge=CONNECTION_QUALITY_RANGE[0], le=CONNECTION_QUALITY_RANGE[1]
+    )
+    minimum_refresh_interval_minutes: StrictInt | None = Field(
+        default=None, ge=REFRESH_INTERVAL_MINUTES_RANGE[0], le=REFRESH_INTERVAL_MINUTES_RANGE[1]
+    )
     discord_webhook_url: str | None = None
     discord_remove_webhook: StrictBool | None = None
     telegram_bot_token: str | None = None

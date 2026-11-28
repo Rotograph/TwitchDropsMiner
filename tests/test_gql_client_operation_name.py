@@ -8,6 +8,7 @@ import pytest
 from src.api.gql_client import GQLClient
 from src.config import ClientType, GQLRawQuery
 
+
 OK = {"data": {"x": 1}}
 
 

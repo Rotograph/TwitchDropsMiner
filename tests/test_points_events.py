@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -487,7 +487,7 @@ def delay_of(event, timing="before_close", seconds=6, percent=50):
 
 
 def started(created, window):
-    start = (datetime.now(timezone.utc) + timedelta(seconds=created)).isoformat()
+    start = (datetime.now(UTC) + timedelta(seconds=created)).isoformat()
     return {"created_at": start, "prediction_window_seconds": window}
 
 
@@ -524,7 +524,7 @@ def test_delay_of_a_malformed_event_is_none(event, timing):
 
 
 def test_delay_reads_nanosecond_timestamps():
-    start = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.123456789Z")
+    start = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.123456789Z")
     assert delay_of({"created_at": start, "prediction_window_seconds": 60}) == pytest.approx(54, abs=2)
 
 
@@ -532,7 +532,7 @@ def test_delay_reads_nanosecond_timestamps():
 
 
 def event(event_id="e1", status="ACTIVE", window=60, ago=60, pairs=((10, 100), (20, 50))):
-    start = (datetime.now(timezone.utc) - timedelta(seconds=ago)).isoformat()
+    start = (datetime.now(UTC) - timedelta(seconds=ago)).isoformat()
     return {"type": "event-updated", "data": {"event": {
         "id": event_id, "status": status, "title": "Who wins?", "created_at": start,
         "prediction_window_seconds": window, "outcomes": outcomes(*pairs),
