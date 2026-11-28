@@ -1246,9 +1246,13 @@ The application uses a web-based interface accessible via browser:
 **web/** - Frontend assets:
 
 - `index.html` - Single-page application layout with tabs (Main, Inventory, History, Points, Settings, Help)
-  - Settings is split into sub-tabs (General, Mining, Games, Notifications, Account &
+  - Settings is split into sub-tabs (General, Mining, Games, Points, Notifications, Account &
     Maintenance): each `.settings-section` lives in exactly one `#settings-panel-*` with a
-    matching `[data-settings-tab]` button; `switchSettingsTab()` toggles `hidden`.
+    matching `[data-settings-tab]` button; `switchSubTab('settings', name)` toggles `hidden`.
+    The History tab uses the same code for its two views (`[data-history-tab]`,
+    `#history-panel-drops` and `#history-panel-points`); `initializeSubTabs(group)` wires a group.
+    The Points tab keeps the status, listed channels and log; its idle channels, claim, share,
+    watch order, raid and prediction settings are in `#settings-panel-points`.
     Keep one tab stop and support Left/Right, Home and End keys. Settings save failures
     must remain visible when the originating panel is hidden; retain inline feedback
     and show a global error notification in that case. Gate the Games panel's full-height
@@ -1509,7 +1513,7 @@ live in `gui.points`, translated in every locale.
   failing streak. The dashboard gets `initial_state.points.history`
   and a `points_history` message (`{"channels": {id: entry}}`) from
   `PointsManager.refresh_history()`, at most once a minute and on an account change; the
-  History section of the Points tab (`renderPointsHistory()`) draws an inline SVG chart.
+  Channel points view of the History tab (`renderPointsHistory()`) draws an inline SVG chart.
 - Per-channel options (`idle_channel_options`, `ChannelOptionSettings` in
   `src/config/settings.py`): `{login: {option: value}}`, only for logins in
   `idle_channels`. Feature options `bonus`, `raids`, `moments`, `predictions`, `streaks`
