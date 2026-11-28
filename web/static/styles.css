@@ -3221,6 +3221,7 @@ header h1 {
 
 /* Points tab: status row, listed channels table and log reuse the settings sections and console look. */
 .points-status-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.points-shortcuts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
 .points-status { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .points-table-wrap { overflow-x: auto; }
 .points-table { width: 100%; border-collapse: collapse; font-size: 14px; }
