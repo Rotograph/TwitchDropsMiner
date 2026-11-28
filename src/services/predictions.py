@@ -6,7 +6,7 @@ import asyncio
 import logging
 import math
 import secrets
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from src.config import GQL_OPERATIONS
@@ -225,7 +225,7 @@ class Predictions:
             offset = window * percent / 100
         else:
             offset = window - seconds
-        remaining = (start - datetime.now(timezone.utc)).total_seconds() + min(offset, window - 1)
+        remaining = (start - datetime.now(UTC)).total_seconds() + min(offset, window - 1)
         return max(remaining, 0.0)
 
     async def _fire(self, event_id: str, delay: float) -> None:

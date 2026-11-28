@@ -4,7 +4,7 @@ import asyncio
 import logging
 from collections import OrderedDict, abc, deque
 from contextlib import asynccontextmanager, suppress
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from time import monotonic, time
 from typing import TYPE_CHECKING, Any, Final, Literal, overload
@@ -456,13 +456,13 @@ class Twitch:
         if self._pause_deadline is not None:
             return self._pause_deadline - monotonic()
         if self._resume_at is not None:
-            return (self._resume_at - datetime.now(timezone.utc)).total_seconds()
+            return (self._resume_at - datetime.now(UTC)).total_seconds()
         return None
 
     def _pause_resume_time(self) -> datetime | None:
         if self._pause_deadline is not None:
             remaining = self._pause_seconds_remaining()
-            return datetime.now(timezone.utc) + timedelta(seconds=max(0.0, remaining or 0.0))
+            return datetime.now(UTC) + timedelta(seconds=max(0.0, remaining or 0.0))
         return self._resume_at
 
     def set_paused(self, paused: bool, duration: str | None = None) -> None:
@@ -474,10 +474,10 @@ class Twitch:
         deadline: float | None = None
         if paused and duration == "tomorrow":
             midnight = datetime.combine(datetime.now().date() + timedelta(days=1), datetime.min.time())
-            resume_at = midnight.astimezone(timezone.utc)
+            resume_at = midnight.astimezone(UTC)
         elif paused and duration is not None:
             interval = self.PAUSE_DURATIONS[duration]
-            resume_at = datetime.now(timezone.utc) + interval
+            resume_at = datetime.now(UTC) + interval
             deadline = monotonic() + interval.total_seconds()
         if paused == self._paused and resume_at == self._resume_at and deadline == self._pause_deadline:
             return
@@ -720,7 +720,7 @@ class Twitch:
                 # figure out which games we want based on selected priorities
                 self.wanted_games.clear()
                 games_to_watch: list[str] = self.settings.games_to_watch
-                next_hour: datetime = datetime.now(timezone.utc) + timedelta(hours=1)
+                next_hour: datetime = datetime.now(UTC) + timedelta(hours=1)
                 logger.info("games_to_watch: %s", games_to_watch)
                 logger.info("priority_list_only: %s", self.settings.priority_list_only)
                 logger.info(
@@ -826,7 +826,7 @@ class Twitch:
                 no_acl: set[Game] = set()
                 flagless: set[Game] = set()
                 acl_channels: set[Channel] = set()
-                next_hour = datetime.now(timezone.utc) + timedelta(hours=1)
+                next_hour = datetime.now(UTC) + timedelta(hours=1)
                 for campaign in self.inventory:
                     if campaign.game in self.wanted_games and campaign.can_earn_within(next_hour):
                         if campaign.allowed_channels:
@@ -845,7 +845,7 @@ class Twitch:
                 for game in no_acl:
                     # for every campaign without an ACL, for it's game,
                     # add a list of live channels with drops enabled
-                    found = await self.get_live_streams(game, drops_enabled=True)
+                    found = await self._discover_game_channels(game, drops_enabled=True)
                     # A channel kept from a fetch without the drops filter has the same
                     # broadcast: record that drops are enabled, keeping the old object.
                     kept = {channel: channel for channel in new_channels}
@@ -861,16 +861,7 @@ class Twitch:
                     # Reward campaigns progress on any live channel in the category. Added
                     # after the lookup above, so a drops-enabled Channel is kept (set.update
                     # leaves an equal existing element in place).
-                    try:
-                        found = await asyncio.wait_for(
-                            self.get_live_streams(game, drops_enabled=False), timeout=REWARD_DIRECTORY_TIMEOUT
-                        )
-                    except ExitRequest:
-                        raise
-                    except REWARD_ERRORS:
-                        logger.warning("Open Reward Campaign channel directory is unavailable")
-                        continue
-                    new_channels.update(found)
+                    new_channels.update(await self._discover_game_channels(game, drops_enabled=False))
                 # Optional: followed channels outside each game's top directory results.
                 known_ids = {channel.id for channel in new_channels}
                 if (watched := self.watching_channel.get_with_default(None)) is not None:
@@ -1183,6 +1174,19 @@ class Twitch:
         return await self._channel_service.get_live_streams(
             game, limit=limit, drops_enabled=drops_enabled
         )
+
+    async def _discover_game_channels(self, game: Game, *, drops_enabled: bool) -> list[Channel]:
+        """Isolate one failed game directory lookup from the rest of discovery."""
+        try:
+            lookup = self.get_live_streams(game, drops_enabled=drops_enabled)
+            if drops_enabled:
+                return await lookup
+            return await asyncio.wait_for(lookup, timeout=REWARD_DIRECTORY_TIMEOUT)
+        except ExitRequest:
+            raise
+        except REWARD_ERRORS as exc:
+            logger.warning("Channel directory for %r is unavailable (%s)", game.name, type(exc).__name__)
+            return []
 
     async def bulk_check_online(self, channels: abc.Iterable[Channel]):
         """Delegate to ChannelService."""
