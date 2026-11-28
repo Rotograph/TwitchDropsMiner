@@ -3278,10 +3278,11 @@ body.dark-mode { --points-accent-text: #bf94ff; --points-up-text: var(--success-
     .points-channel-table, .points-channel-table tbody { display: block; }
     .points-channel-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
     .points-channel-table tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; padding: 10px 12px; border-bottom: 1px solid var(--border-color); }
-    .points-channel-table td { display: block; padding: 0; border: 0; min-width: 0; }
-    .points-channel-table .points-channel { overflow: hidden; text-overflow: ellipsis; }
-    .points-channel-table .points-balance { grid-column: 2; grid-row: 1; }
-    .points-channel-table .points-gain { grid-column: 2; grid-row: 2; text-align: right; }
+    .points-channel-table tr > td { display: block; padding: 0; border: 0; min-width: 0; }
+    /* the name has the whole first line (25 characters fit at 320px); status and balance, then the gain */
+    .points-channel-table .points-channel { grid-column: 1 / -1; overflow-wrap: anywhere; white-space: normal; }
+    .points-channel-table .points-balance { grid-column: 2; grid-row: 2; }
+    .points-channel-table .points-gain { grid-column: 2; grid-row: 3; text-align: right; }
     .points-channel-table .points-gain-time { display: block; margin-left: 0; }
     .points-channel-table tr[aria-current="true"] { background: rgba(145, 70, 255, 0.07); box-shadow: inset 3px 0 0 var(--accent-color); }
     .points-channel-table tr[aria-current="true"] > td,
@@ -3303,10 +3304,9 @@ body.dark-mode { --points-accent-text: #bf94ff; --points-up-text: var(--success-
 @supports selector(:has(*)) {
     @media (min-width: 1000px) {
         .settings-container:has(> #settings-panel-points:not([hidden])) { max-width: none; }
-        .points-settings { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 20px; align-items: start; }
-        /* the channel list stays in view next to the long option column; a long list scrolls inside */
-        #idle-channels-section { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow-y: auto; margin-bottom: 0; }
-        .points-settings-options > .settings-section:last-child { margin-bottom: 0; }
+        /* the list and its watch options on the left, the event options on the right */
+        .points-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; align-items: start; }
+        .points-settings > div > .settings-section:last-child { margin-bottom: 0; }
     }
 }
 
@@ -3332,7 +3332,10 @@ body.dark-mode { --points-accent-text: #bf94ff; --points-up-text: var(--success-
     .points-container .settings-section select,
     .points-container .settings-section input[type="number"] { display: block; width: 100%; margin: 6px 0 0; }
     .points-table th, .points-table td { padding: 6px 4px; }
-    /* room for the channel name next to its five controls */
-    .points-settings .idle-channel-row { gap: 6px; }
-    .points-settings .idle-channel-row .small-btn { min-width: 28px; padding: 4px 6px; }
+    /* the full channel name on the first line, its controls right-aligned on the second;
+       the drag handle is only a hint (the row itself drags, the arrows move it too) */
+    .points-settings .idle-channel-row { gap: 6px; justify-content: flex-end; }
+    .points-settings .idle-channel-row .drag-handle { display: none; }
+    .points-settings .idle-channel-name { flex: 1 1 calc(100% - 30px); white-space: normal; overflow-wrap: anywhere; }
+    .points-settings .idle-channel-row :is(.small-btn, .remove-btn) { min-width: 32px; min-height: 28px; }
 }

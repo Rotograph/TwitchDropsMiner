@@ -455,21 +455,21 @@
                     </section>
                 </div>
                 <div id="settings-panel-points" class="settings-panel points-container points-settings" role="tabpanel" aria-labelledby="settings-tab-points" hidden>
-                    <section class="settings-section" id="idle-channels-section">
-                        <h2 id="idle-channels-title">Idle watching channels</h2>
-                        <p id="idle-channels-help" class="help-text">When nothing can be mined, watch these channels for their watch streak and channel points. Use lowercase Twitch logins, at most 20. With the watch priority List order, this order decides which live channel is watched first. With two channels watched at a time, they are also watched next to drop mining.</p>
-                        <div id="idle-channels-list" class="reward-type-list ordered"></div>
-                        <div class="idle-channel-add-row">
-                            <input type="text" id="idle-channel-input" maxlength="25" autocomplete="off" aria-label="Idle watching channels" />
-                            <button type="button" id="idle-channel-add" class="small-btn">Add</button>
-                        </div>
-                        <div class="idle-import-row">
-                            <button type="button" id="idle-import-btn" class="small-btn" data-points-text="import_follows">Import followed channels</button>
-                            <p id="idle-import-status" class="help-text" role="status"></p>
-                        </div>
-                        <p id="idle-channels-error" class="help-text" role="alert" hidden></p>
-                    </section>
-                    <div class="points-settings-options">
+                    <div class="points-settings-main">
+                        <section class="settings-section" id="idle-channels-section">
+                            <h2 id="idle-channels-title">Idle watching channels</h2>
+                            <p id="idle-channels-help" class="help-text">When nothing can be mined, watch these channels for their watch streak and channel points. Use lowercase Twitch logins, at most 20. With the watch priority List order, this order decides which live channel is watched first. With two channels watched at a time, they are also watched next to drop mining.</p>
+                            <div id="idle-channels-list" class="reward-type-list ordered"></div>
+                            <div class="idle-channel-add-row">
+                                <input type="text" id="idle-channel-input" maxlength="25" autocomplete="off" aria-label="Idle watching channels" />
+                                <button type="button" id="idle-channel-add" class="small-btn">Add</button>
+                            </div>
+                            <div class="idle-import-row">
+                                <button type="button" id="idle-import-btn" class="small-btn" data-points-text="import_follows">Import followed channels</button>
+                                <p id="idle-import-status" class="help-text" role="status"></p>
+                            </div>
+                            <p id="idle-channels-error" class="help-text" role="alert" hidden></p>
+                        </section>
                         <section class="settings-section">
                             <label class="checkbox-label">
                                 <input type="checkbox" id="claim-channel-points" aria-describedby="claim-channel-points-help" />
@@ -519,6 +519,8 @@
                             <p id="points-setting-watch_slots-help" class="help-text" data-points-text="watch_slots_help">With two, idle watching also runs while a drop is mined: it watches one listed channel next to the drop channel. The second slot only uses listed channels that drops cannot use and whose stream lists no drops campaign, so drop mining keeps its channel. This doubles the video traffic. Not tested live yet.</p>
                             <p id="points-setting-watch_slots-error" class="help-text" role="alert" hidden></p>
                         </section>
+                    </div>
+                    <div class="points-settings-options">
                         <section class="settings-section">
                             <h2 data-points-text="actions_header">Raids, moments and chat</h2>
                             <label class="checkbox-label">
@@ -563,7 +565,7 @@
                                     <p id="points-setting-prediction_strategy-help" class="help-text" data-points-text="prediction_strategy_help">How the outcome is chosen. No strategy is known to beat the other viewers on average.</p>
                                     <p id="points-setting-prediction_strategy-error" class="help-text" role="alert" hidden></p>
                                 </div>
-                                <div class="points-field" data-show-when="prediction_strategy:fixed">
+                                <div class="points-field points-field-wide" data-show-when="prediction_strategy:fixed">
                                     <label>
                                         <span data-points-text="prediction_fixed_option">Outcome number for Fixed</span>
                                         <input type="number" id="points-setting-prediction_fixed_option" data-points-setting="prediction_fixed_option" min="1" max="10" step="1" inputmode="numeric" aria-describedby="points-setting-prediction_fixed_option-help" />
@@ -603,7 +605,7 @@
                                     <p id="points-setting-prediction_min_voters-help" class="help-text" data-points-text="prediction_min_voters_help">No bet unless at least this many users have voted, over all outcomes, from 0 to 1000000. 0 turns the check off.</p>
                                     <p id="points-setting-prediction_min_voters-error" class="help-text" role="alert" hidden></p>
                                 </div>
-                                <div class="points-field">
+                                <div class="points-field points-field-wide">
                                     <label>
                                         <span data-points-text="prediction_min_odds">Lowest odds to bet</span>
                                         <input type="number" id="points-setting-prediction_min_odds" data-points-setting="prediction_min_odds" min="1" max="100" step="0.01" inputmode="decimal" aria-describedby="points-setting-prediction_min_odds-help" />
