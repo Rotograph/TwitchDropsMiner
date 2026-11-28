@@ -72,6 +72,8 @@ class PointsManager:
                 "balance": idle.balances.get(channel_id) if channel_id is not None else None,
                 "last_gain": self._gains.get(login),
                 "side": side is not None and side.login == login,
+                # the idle loop's own pick, still watched (main or second slot)
+                "watching": channel is not None and idle.idle_watched(channel.id) is not None,
             })
         return {"paused": idle.points_paused, "active": idle.active, "channels": channels}
 

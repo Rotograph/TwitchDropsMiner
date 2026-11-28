@@ -475,7 +475,7 @@
             "col_last_gain": "Última ganancia",
             "live": "En directo",
             "offline": "Sin conexión",
-            "no_channels": "No hay canales en la lista. Añade canales abajo, en Canales de visualización pasiva.",
+            "no_channels": "No hay canales en la lista. Añade canales en Configuración > Puntos.",
             "log_header": "Registro de puntos de canal",
             "save_error": "No se pudo guardar esta opción de puntos de canal. Inténtalo de nuevo.",
             "order_header": "Orden de visualización",

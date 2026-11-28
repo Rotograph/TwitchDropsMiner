@@ -2858,7 +2858,8 @@ function formatPointsGain(gain, labels) {
     const label = Object.hasOwn(labels, key) ? labels[key] : reason;
     const amount = (gain.points > 0 ? '+' : '') + gain.points.toLocaleString();
     const at = new Date(gain.at);
-    return {text: `${amount} ${label}`.trim(), time: Number.isNaN(at.getTime()) ? '' : at.toLocaleString()};
+    return {amount, label, up: gain.points > 0,
+        time: Number.isNaN(at.getTime()) ? '' : formatHistoryTime(at.getTime() / 1000)};
 }
 
 function renderPoints() {
@@ -2866,33 +2867,47 @@ function renderPoints() {
     if (!tbody) return;
     const t = state.translations.gui?.points || {};
     const {paused, active, channels} = state.points;
-    document.getElementById('points-status').textContent = paused
+    const status = document.getElementById('points-status');
+    status.textContent = paused
         ? (t.status_paused || 'Paused: no channel points actions until resumed')
         : active ? (t.status_active || 'Active: watching your listed channels')
         : (t.status_inactive || 'Inactive: idle watching is not running');
+    status.dataset.state = paused ? 'paused' : active ? 'active' : 'inactive';
     const button = document.getElementById('points-pause-btn');
     button.textContent = paused ? (t.resume || 'Resume channel points') : (t.pause || 'Pause channel points');
     button.setAttribute('aria-pressed', String(paused));
     const empty = channels.length === 0;
     document.getElementById('points-empty').hidden = !empty;
     document.getElementById('points-table').hidden = empty;
+    const nowWatching = state.translations.gui?.channels?.now_watching || 'Now Watching';
     tbody.replaceChildren(...channels.map(channel => {
-        const row = makeElement('tr');
+        // explicit roles: the stacked layout on narrow screens would drop the table semantics
+        const row = makeElement('tr', {role: 'row'});
         row.dataset.login = String(channel.login);
         const live = channel.live === true;
         const gain = formatPointsGain(channel.last_gain, t.reasons || {});
-        const gainCell = makeElement('td', {}, gain ? gain.text : '-');
-        if (gain?.time) gainCell.appendChild(makeElement('span', {class: 'points-gain-time'}, gain.time));
-        const name = makeElement('td', {}, channel.name || channel.login);
-        // the channel the second watch slot watches next to drop mining
+        const gainCell = makeElement('td', {class: 'points-gain', role: 'cell'});
+        if (gain) {
+            gainCell.appendChild(makeElement('span', {class: gain.up ? 'points-gain-amount points-gain-up' : 'points-gain-amount'}, gain.amount));
+            gainCell.appendChild(makeElement('span', {class: 'points-gain-reason'}, gain.label));
+            if (gain.time) gainCell.appendChild(makeElement('span', {class: 'points-gain-time'}, gain.time));
+        } else {
+            gainCell.textContent = '-';
+        }
+        const name = makeElement('td', {class: 'points-channel', role: 'cell'}, channel.name || channel.login);
+        // the channel the second watch slot watches next to drop mining; it is also the watched row
         if (channel.side === true) {
             name.appendChild(makeElement('span', {class: 'points-side'}, t.side_watching || 'Watching (second slot)'));
+        } else if (channel.watching === true) {
+            name.appendChild(makeElement('span', {class: 'points-side'}, nowWatching));
         }
+        if (channel.watching === true) row.setAttribute('aria-current', 'true');
         row.replaceChildren(
             name,
-            makeElement('td', {class: live ? 'points-live' : 'points-offline'},
+            makeElement('td', {class: live ? 'points-live' : 'points-offline', role: 'cell'},
                 live ? (t.live || 'Live') : (t.offline || 'Offline')),
-            makeElement('td', {}, Number.isInteger(channel.balance) ? channel.balance.toLocaleString() : '-'),
+            makeElement('td', {class: 'points-balance', role: 'cell'},
+                Number.isInteger(channel.balance) ? channel.balance.toLocaleString() : '-'),
             gainCell);
         return row;
     }));
@@ -2901,7 +2916,9 @@ function renderPoints() {
 // Balance history of the listed channels: pointsHistory is {channel id: {login, samples, gains, bets}}.
 const HISTORY_CATEGORY_LABELS = {watch: 'watch', bonus: 'claim', raid: 'raid', streak: 'watch_streak', bet: 'prediction', other: 'other'};
 const HISTORY_BET_KEYS = ['won', 'lost', 'refunded', 'points_won'];
-const HISTORY_CHART = {width: 320, height: 150, left: 58, right: 10, top: 10, bottom: 28};
+// drawn at the element's own width (one SVG unit per CSS pixel), so the 12px axis text never scales
+const HISTORY_CHART = {width: 320, height: 200, left: 64, right: 12, top: 10, bottom: 28};
+let pointsHistoryWidth = 0;
 let pointsHistory = {};
 let pointsHistoryChannel = '';
 
@@ -2916,8 +2933,8 @@ function formatHistoryTime(seconds) {
         {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
 }
 
-function buildHistoryChart(samples, label) {
-    const c = HISTORY_CHART;
+function buildHistoryChart(samples, label, width = HISTORY_CHART.width) {
+    const c = {...HISTORY_CHART, width};
     const svgNS = 'http://www.w3.org/2000/svg';
     const make = (tag, attrs, text = null) => {
         const el = document.createElementNS(svgNS, tag);
@@ -2939,7 +2956,8 @@ function buildHistoryChart(samples, label) {
     svg.appendChild(make('line', {class: 'history-axis', x1: c.left, y1: c.top + plotH, x2: c.width - c.right, y2: c.top + plotH}));
     svg.appendChild(make('text', {x: c.left - 4, y: c.top + 8, 'text-anchor': 'end'}, hi.toLocaleString()));
     svg.appendChild(make('text', {x: c.left - 4, y: c.top + plotH, 'text-anchor': 'end'}, lo.toLocaleString()));
-    svg.appendChild(make('text', {x: c.left, y: c.height - 8, 'text-anchor': 'start'}, formatHistoryTime(t0)));
+    // on a narrow chart the first time starts under the value labels, so it does not run into the last one
+    svg.appendChild(make('text', {x: c.width < 400 ? 0 : c.left, y: c.height - 8, 'text-anchor': 'start'}, formatHistoryTime(t0)));
     if (t1 !== t0) svg.appendChild(make('text', {x: c.width - c.right, y: c.height - 8, 'text-anchor': 'end'}, formatHistoryTime(t1)));
     svg.appendChild(make('polyline', {class: 'history-line',
         points: samples.map(s => `${x(s[0]).toFixed(1)},${y(s[1]).toFixed(1)}`).join(' ')}));
@@ -2971,7 +2989,9 @@ function renderPointsHistory() {
         .replace('{to}', formatHistoryTime(Math.max(...times)))
         .replace('{min}', Math.min(...values).toLocaleString())
         .replace('{max}', Math.max(...values).toLocaleString());
-    document.getElementById('points-history-chart').replaceChildren(buildHistoryChart(samples, label));
+    const chart = document.getElementById('points-history-chart');
+    pointsHistoryWidth = chart.clientWidth || 0;
+    chart.replaceChildren(buildHistoryChart(samples, label, pointsHistoryWidth || HISTORY_CHART.width));
     const reasons = t.reasons || {};
     document.getElementById('points-history-gains').replaceChildren(...Object.entries(HISTORY_CATEGORY_LABELS).map(
         ([category, key]) => makeElement('tr', {'data-category': category}, null, row => {
@@ -3034,6 +3054,17 @@ function renderPointsSettings(settings = state.settings) {
         if (typeof value === 'boolean') input.checked = value;
         else input.value = String(value);
     }
+    showApplicablePointsFields();
+}
+
+// A field marked data-show-when="<key>:<value>,<value>" only shows while that select has one of the values.
+// Hidden fields keep their inputs and saved values.
+function showApplicablePointsFields() {
+    document.querySelectorAll('[data-show-when]').forEach(field => {
+        const [key, values] = field.dataset.showWhen.split(':');
+        const select = document.getElementById(`points-setting-${key}`);
+        if (select) field.hidden = !values.split(',').includes(select.value);
+    });
 }
 
 // Save one channel points option alone; a failure shows the error and restores the confirmed value.
@@ -3041,6 +3072,8 @@ async function savePointsSetting(key) {
     const spec = POINTS_SETTINGS[key];
     const input = document.getElementById(`points-setting-${key}`);
     const error = document.getElementById(`points-setting-${key}-error`);
+    // the choice shows its fields at once; a failed save puts the confirmed choice and its fields back
+    showApplicablePointsFields();
     const confirmed = typeof state.settings[key] === typeof spec.default ? state.settings[key] : spec.default;
     let requested;
     if (typeof spec.default === 'boolean') requested = input.checked;
@@ -4110,6 +4143,13 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     initializeSubTabs('settings');
     initializeSubTabs('history');
+    // the chart is drawn at its element's width: draw it again when that width changes, also when its view opens
+    const pointsChart = document.getElementById('points-history-chart');
+    if (pointsChart && typeof ResizeObserver === 'function') {
+        new ResizeObserver(() => {
+            if (pointsChart.clientWidth && pointsChart.clientWidth !== pointsHistoryWidth) renderPointsHistory();
+        }).observe(pointsChart);
+    }
     document.getElementById('points-open-settings').addEventListener('click', () => openSubTab('settings', 'settings', 'points'));
     document.getElementById('points-open-history').addEventListener('click', () => openSubTab('history', 'history', 'points'));
 

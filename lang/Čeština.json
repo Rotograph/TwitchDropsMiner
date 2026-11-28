@@ -475,7 +475,7 @@
             "col_last_gain": "Poslední zisk",
             "live": "Živě",
             "offline": "Offline",
-            "no_channels": "V seznamu nejsou žádné kanály. Přidejte kanály níže v části Kanály pro pasivní sledování.",
+            "no_channels": "V seznamu nejsou žádné kanály. Přidejte kanály v části Nastavení > Body.",
             "log_header": "Protokol bodů kanálu",
             "save_error": "Tuto volbu bodů kanálu se nepodařilo uložit. Zkuste to znovu.",
             "order_header": "Pořadí sledování",

@@ -1,1 +1,1 @@
-__version__ = "2.7.1+fork.7"
+__version__ = "2.7.1+fork.8"

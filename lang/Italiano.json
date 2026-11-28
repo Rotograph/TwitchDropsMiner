@@ -475,7 +475,7 @@
             "col_last_gain": "Ultimo guadagno",
             "live": "In diretta",
             "offline": "Offline",
-            "no_channels": "Nessun canale in elenco. Aggiungi canali qui sotto, in Canali per la visione passiva.",
+            "no_channels": "Nessun canale in elenco. Aggiungi canali in Impostazioni > Punti.",
             "log_header": "Registro dei punti del canale",
             "save_error": "Impossibile salvare questa opzione dei punti del canale. Riprova.",
             "order_header": "Ordine di visione",

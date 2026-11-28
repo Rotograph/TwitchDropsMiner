@@ -19,8 +19,9 @@ APP_JS = (ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
 CSS = (ROOT / "web" / "static" / "styles.css").read_text(encoding="utf-8")
 ENGLISH = json.loads((ROOT / "lang" / "English.json").read_text(encoding="utf-8"))["gui"]
 POINTS_SETTINGS_JS = re.search(r"const POINTS_SETTINGS = \{.*?\n\};", APP_JS, re.S).group(0)
-FUNCTIONS = ["makeElement", "appendLogLine", "updatePointsState", "formatPointsGain", "renderPoints", "translatePoints",
-             "togglePointsPause", "renderPointsSettings", "savePointsSetting"]
+FUNCTIONS = ["makeElement", "appendLogLine", "updatePointsState", "formatHistoryTime", "formatPointsGain", "renderPoints",
+             "translatePoints", "togglePointsPause", "renderPointsSettings", "showApplicablePointsFields",
+             "savePointsSetting"]
 needs_node = pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend tests")
 
 POINTS_DOM = REWARD_DOM + POINTS_SETTINGS_JS + r"""
@@ -36,7 +37,8 @@ for (const key of Object.keys(POINTS_SETTINGS)) {
     add('points-setting-' + key, kind === 'boolean' ? 'input' : kind === 'string' ? 'select' : 'input');
     add('points-setting-' + key + '-error', 'p').hidden = true;
 }
-document.querySelectorAll = selector => walk(root).filter(node => selector === '[data-points-text]' && 'pointsText' in node.dataset);
+const datasetKeys = {'[data-points-text]': 'pointsText', '[data-show-when]': 'showWhen'};
+document.querySelectorAll = selector => walk(root).filter(node => datasetKeys[selector] in node.dataset);
 state.points = {paused: false, active: false, channels: []};
 state.translations.gui.points = {};
 const tableRows = () => document.getElementById('points-tbody').children;
@@ -157,15 +159,18 @@ const first = cells(tableRows()[0]);
 assert.equal(first[0], 'SampleChannel');
 assert.equal(first[1], 'Live');
 assert.equal(first[2], (1234).toLocaleString());
-assert.ok(first[3].startsWith('+450 Watch streak'), first[3]);
-assert.ok(tableRows()[0].children[3].children[0].classes.has('points-gain-time'), 'time under the amount');
+const gain = tableRows()[0].children[3].children;
+assert.deepEqual(gain.slice(0, 2).map(span => span.textContent), ['+450', 'Watch streak']);
+assert.ok(gain[0].classes.has('points-gain-up'), 'a positive gain gets the success colour');
+assert.ok(gain[2].classes.has('points-gain-time') && gain[2].textContent !== '', 'time after the reason');
 assert.deepEqual(cells(tableRows()[1]), ['QuietOne', 'Offline', '-', '-']);
 assert.ok(tableRows()[1].children[1].classes.has('points-offline'));
 const odd = tableRows()[2];
 assert.equal(odd.children[0].textContent, '<b>x</b>');
 assert.ok(odd.children.every(cell => cell.children.every(child => child.tag !== 'b')));
 assert.equal(odd.children[2].textContent, '0', 'a zero balance is shown, not a dash');
-assert.equal(odd.children[3].textContent, '+5 NEW_REASON', 'unknown reason shows the code; bad time is dropped');
+assert.deepEqual(odd.children[3].children.map(span => span.textContent), ['+5', 'NEW_REASON'],
+    'unknown reason shows the code; bad time is dropped');
 assert.equal(document.getElementById('points-empty').hidden, true);
 assert.equal(document.getElementById('points-table').hidden, false);
 assert.ok(document.getElementById('points-status').textContent.startsWith('Active'));
@@ -474,3 +479,133 @@ state.translations.gui.points = {side_watching: 'Second slot'};
 renderPoints();
 assert.equal(tableRows()[0].children[0].children[0].textContent, 'Second slot');
 """)
+
+
+@needs_node
+def test_the_watched_row_is_marked_current_with_a_label_only_once():
+    run_points(r"""
+state.translations.gui.channels = {now_watching: '<i>Nu</i>'};
+updatePointsState({paused: false, active: true, channels: [
+    {login: 'one', name: 'One', live: true, balance: 1, last_gain: {points: -20, reason: 'BET', at: 'bad'}, watching: true},
+    {login: 'two', name: 'Two', live: true, balance: 2, last_gain: null, watching: false},
+    {login: 'three', name: 'Three', live: true, balance: 3, last_gain: null, side: true, watching: true},
+    {login: 'four', name: 'Four', live: false, balance: null, last_gain: null}]});
+const [one, two, three, four] = tableRows();
+assert.equal(one.attrs['aria-current'], 'true');
+assert.deepEqual(one.children[0].children.map(label => label.textContent), ['<i>Nu</i>'], 'translated text, not markup');
+assert.ok(one.children[0].children.every(label => label.tag === 'span'));
+assert.ok(!one.children[3].children[0].classes.has('points-gain-up'), 'a loss is not shown in the success colour');
+assert.equal(one.children[3].children[0].textContent, (-20).toLocaleString());
+for (const row of [two, four]) {
+    assert.equal(row.attrs['aria-current'], undefined);
+    assert.equal(row.children[0].children.length, 0);
+}
+// the second slot row is current too and keeps its own label instead of a second one
+assert.equal(three.attrs['aria-current'], 'true');
+assert.deepEqual(three.children[0].children.map(label => label.textContent), ['Watching (second slot)']);
+delete state.translations.gui.channels;
+renderPoints();
+assert.equal(tableRows()[0].children[0].children[0].textContent, 'Now Watching');
+updatePointsState({paused: false, active: true, channels: [{login: 'one', name: 'One', live: true, balance: 1, last_gain: null}]});
+assert.equal(tableRows()[0].attrs['aria-current'], undefined, 'the mark moves with the watch');
+""")
+
+
+@needs_node
+def test_prediction_fields_show_only_for_their_choice_and_keep_their_values():
+    run_points(r"""
+const field = when => {
+    const node = Object.assign(new Node('div'), {dataset: {showWhen: when}});
+    root.appendChild(node);
+    return node;
+};
+const fixed = field('prediction_strategy:fixed');
+const seconds = field('prediction_timing:before_close,after_open');
+const percent = field('prediction_timing:percent');
+const missing = field('no_such_setting:x');
+const shown = () => [fixed, seconds, percent].map(node => !node.hidden);
+state.settings = {...state.settings, prediction_fixed_option: 4, prediction_timer_percent: 30};
+renderPointsSettings();
+assert.deepEqual(shown(), [false, true, false], 'defaults: smart strategy, before close');
+assert.equal(missing.hidden, false, 'a field without its select is left alone');
+// the choice shows its field at once, before the save returns
+response = {ok: true, json: async () => ({success: true, settings: {prediction_strategy: 'fixed'}})};
+control('prediction_strategy').value = 'fixed';
+const saving = savePointsSetting('prediction_strategy');
+assert.deepEqual(shown(), [true, true, false]);
+await saving;
+assert.deepEqual(shown(), [true, true, false]);
+assert.equal(control('prediction_fixed_option').value, '4');
+response = {ok: true, json: async () => ({success: true, settings: {prediction_timing: 'percent'}})};
+control('prediction_timing').value = 'percent';
+await savePointsSetting('prediction_timing');
+assert.deepEqual(shown(), [true, false, true]);
+// a failed save puts the confirmed choice and its fields back
+response = {ok: false};
+control('prediction_timing').value = 'after_open';
+const failing = savePointsSetting('prediction_timing');
+assert.deepEqual(shown(), [true, true, false]);
+await failing;
+assert.deepEqual(shown(), [true, false, true]);
+assert.equal(failure('prediction_timing').hidden, false);
+// a hidden field keeps its value and still saves
+response = {ok: true, json: async () => ({success: true, settings: {prediction_strategy: 'smart'}})};
+control('prediction_strategy').value = 'smart';
+await savePointsSetting('prediction_strategy');
+assert.equal(fixed.hidden, true);
+assert.equal(control('prediction_fixed_option').value, '4');
+calls.length = 0;
+response = {ok: true, json: async () => ({success: true, settings: {prediction_fixed_option: 6}})};
+control('prediction_fixed_option').value = '6';
+await savePointsSetting('prediction_fixed_option');
+assert.deepEqual(calls, [{prediction_fixed_option: 6}]);
+assert.equal(state.settings.prediction_fixed_option, 6);
+assert.equal(control('prediction_fixed_option').value, '6');
+assert.equal(fixed.hidden, true);
+""")
+
+
+def test_conditional_prediction_fields_name_real_choices():
+    pairs = re.findall(r'data-show-when="(\w+):([\w,]+)">\s*<label>\s*<span[^>]*>[^<]*</span>\s*'
+                       r'<input[^>]*id="points-setting-(\w+)"', HTML)
+    assert {(key, values, field) for key, values, field in pairs} == {
+        ("prediction_strategy", "fixed", "prediction_fixed_option"),
+        ("prediction_timing", "before_close,after_open", "prediction_delay_seconds"),
+        ("prediction_timing", "percent", "prediction_timer_percent")}
+    assert HTML.count("data-show-when=") == 3
+    for key, values, _field in pairs:
+        start = HTML.index(f'id="points-setting-{key}"')
+        options = re.findall(r'<option value="(\w+)"', HTML[start:HTML.index("</select>", start)])
+        assert set(values.split(",")) <= set(options), (key, values)
+
+
+def test_channel_table_markup_has_explicit_table_roles():
+    table = HTML[HTML.index('<table id="points-table"'):HTML.index('</table>', HTML.index('<table id="points-table"'))]
+    assert 'role="table"' in table.split(">", 1)[0]
+    assert re.search(r'<thead role="rowgroup">\s*<tr role="row">', table)
+    assert table.count('role="columnheader"') == table.count("<th ") == 4
+    assert '<tbody id="points-tbody" role="rowgroup">' in table
+    # the stacked layout is the one that changes display; it must stay on this table only
+    assert ".points-channel-table tr { display: grid;" in CSS
+
+
+@needs_node
+def test_rendered_channel_rows_and_cells_keep_their_roles():
+    run_points(r"""
+updatePointsState({paused: false, active: true, channels: [
+    {login: 'one', name: 'One', live: true, balance: 1, last_gain: {points: 5, reason: 'WATCH', at: 'bad'}, watching: true},
+    {login: 'two', name: 'Two', live: false, balance: null, last_gain: null}]});
+for (const row of tableRows()) {
+    assert.equal(row.attrs.role, 'row');
+    assert.equal(row.children.length, 4);
+    assert.ok(row.children.every(cell => cell.tag === 'td' && cell.attrs.role === 'cell'));
+}
+""")
+
+
+def test_every_locale_points_to_the_settings_points_tab_for_an_empty_list():
+    for path in sorted((ROOT / "lang").glob("*.json")):
+        gui = json.loads(path.read_text(encoding="utf-8"))["gui"]
+        text = gui["points"]["no_channels"]
+        # the list is under Settings > Points, not on the Points tab: name both tabs as the UI shows them
+        assert f'{gui["tabs"]["settings"]} > {gui["tabs"]["points"]}' in text, (path.name, text)

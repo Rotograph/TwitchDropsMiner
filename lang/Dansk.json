@@ -475,7 +475,7 @@
             "col_last_gain": "Seneste gevinst",
             "live": "Live",
             "offline": "Offline",
-            "no_channels": "Ingen kanaler er listet. Tilføj kanaler under Kanaler til passiv visning nedenfor.",
+            "no_channels": "Ingen kanaler er listet. Tilføj kanaler under Indstillinger > Point.",
             "log_header": "Log over kanalpoint",
             "save_error": "Indstillingen for kanalpoint kunne ikke gemmes. Prøv igen.",
             "order_header": "Rækkefølge for visning",

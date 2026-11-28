@@ -475,7 +475,7 @@
             "col_last_gain": "Ultimul câștig",
             "live": "Live",
             "offline": "Offline",
-            "no_channels": "Nu există canale în listă. Adaugă canale mai jos, la Canale pentru vizionare pasivă.",
+            "no_channels": "Nu există canale în listă. Adaugă canale în Setări > Puncte.",
             "log_header": "Jurnal puncte de canal",
             "save_error": "Această opțiune pentru punctele de canal nu a putut fi salvată. Încearcă din nou.",
             "order_header": "Ordinea vizionării",

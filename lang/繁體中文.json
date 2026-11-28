@@ -475,7 +475,7 @@
             "col_last_gain": "最近獲得",
             "live": "直播中",
             "offline": "離線",
-            "no_channels": "清單中沒有頻道。請在下方的掛機觀看頻道中新增頻道。",
+            "no_channels": "清單中沒有頻道。請在設置 > 點數中新增頻道。",
             "log_header": "頻道點數記錄",
             "save_error": "無法儲存此頻道點數選項。請重試。",
             "order_header": "觀看順序",

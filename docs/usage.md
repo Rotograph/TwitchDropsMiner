@@ -17,7 +17,7 @@ simultaneous viewing can disrupt progress.
 | Main | Login status, the current campaign and drop, wanted rewards, console output, and channels |
 | Inventory | Campaigns and rewards, with status, benefit, and game filters |
 | History | Two views: **Drop History** (locally recorded claims, statistics, and CSV export) and **Channel points** (the balance history and bets per channel) |
-| Points | Channel points of idle watching: pause button, listed channels with balance and last gain, and the channel points log, with shortcuts to the points settings and the points history |
+| Points | Channel points of idle watching: pause button, listed channels with balance and last gain (the channel being watched is highlighted), and the channel points log, with shortcuts to the points settings and the points history |
 | Settings | Grouped into sub-tabs: **General** (theme, connection, proxy), **Mining** (reward types, mining hours, account-link override, ignored names), **Games** (priorities and reload), **Points** (idle watching channels and the channel points settings), **Notifications** (Discord, Telegram), and **Account & Maintenance** (dashboard password, cache, diagnostics, Twitch logout) |
 | Help | A quick explanation of mining and Telegram setup |
 
@@ -447,6 +447,9 @@ Twitch credits points and drops for two watches at a time is unknown.
     No mode bets later than 1 second before the window closes, and a time already past
     means a bet at once. The time is set when TDM first sees the prediction; changing the
     option later does not move a bet that is already waiting.
+  - **Settings → Points** shows the outcome number only with the `fixed` strategy, the
+    seconds only with `before_close` or `after_open` and the percent only with `percent`.
+    A hidden field keeps its saved value.
   - Three filters skip a bet and write a line to the points log. All are off at their
     default. `prediction_min_balance` (0 to 10000000, default 0) skips while the channel
     balance is below it. `prediction_min_voters` (0 to 1000000, default 0) skips unless at
