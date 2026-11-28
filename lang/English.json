@@ -475,7 +475,7 @@
             "col_last_gain": "Last gain",
             "live": "Live",
             "offline": "Offline",
-            "no_channels": "No channels are listed. Add channels under Idle watching channels below.",
+            "no_channels": "No channels are listed. Add channels under Settings > Points.",
             "log_header": "Channel points log",
             "save_error": "Could not save this channel points option. Please try again.",
             "order_header": "Watch order",

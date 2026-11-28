@@ -3487,6 +3487,14 @@ function applyTranslations(t) {
     if (tabButtons.points && t.gui?.tabs) tabButtons.points.textContent = t.gui.tabs.points;
     if (tabButtons.settings && t.gui?.tabs) tabButtons.settings.textContent = t.gui.tabs.settings;
     if (t.gui?.points && typeof translatePoints === 'function') translatePoints(t.gui.points);
+    if (t.gui?.tabs && t.gui?.points) {
+        const shortcuts = {'points-open-settings': [t.gui.tabs.settings, t.gui.tabs.points],
+            'points-open-history': [t.gui.tabs.history, t.gui.points.title]};
+        for (const [id, parts] of Object.entries(shortcuts)) {
+            const button = document.getElementById(id);
+            if (button) button.textContent = parts.join(' > ');
+        }
+    }
     if (tabButtons.help && t.gui?.tabs) tabButtons.help.textContent = t.gui.tabs.help;
 
     // Update Main tab - Login section
@@ -3542,7 +3550,7 @@ function applyTranslations(t) {
         if (generalHeader) generalHeader.textContent = t.gui.settings.general.name;
         const settingsTabLabels = {
             general: t.gui.settings.general?.name, mining: t.gui.settings.tab_mining,
-            games: t.gui.settings.tab_games, notifications: t.gui.settings.tab_notifications,
+            games: t.gui.settings.tab_games, points: t.gui?.tabs?.points, notifications: t.gui.settings.tab_notifications,
             account: t.gui.settings.tab_account
         };
         for (const [name, label] of Object.entries(settingsTabLabels)) {
@@ -4046,22 +4054,23 @@ function switchTab(tabName) {
     }
 }
 
-function switchSettingsTab(name) {
-    const buttons = [...document.querySelectorAll('[data-settings-tab]')];
-    if (!buttons.some(button => button.dataset.settingsTab === name)) return;
+// Shared by every tab group: buttons carry data-<group>-tab, panels have the id <group>-panel-<name>.
+function switchSubTab(group, name) {
+    const buttons = [...document.querySelectorAll(`[data-${group}-tab]`)];
+    if (!buttons.some(button => button.dataset[`${group}Tab`] === name)) return;
     buttons.forEach(button => {
-        const active = button.dataset.settingsTab === name;
+        const active = button.dataset[`${group}Tab`] === name;
         button.classList.toggle('active', active);
         button.setAttribute('aria-selected', String(active));
         button.setAttribute('tabindex', active ? '0' : '-1');
     });
     document.querySelectorAll('.settings-panel').forEach(panel => {
-        panel.hidden = panel.id !== `settings-panel-${name}`;
+        if (panel.id.startsWith(`${group}-panel-`)) panel.hidden = panel.id !== `${group}-panel-${name}`;
     });
 }
 
-function handleSettingsTabKeydown(event) {
-    const buttons = [...document.querySelectorAll('[data-settings-tab]')];
+function handleSubTabKeydown(group, event) {
+    const buttons = [...document.querySelectorAll(`[data-${group}-tab]`)];
     const current = buttons.indexOf(event.currentTarget);
     if (current < 0) return;
     const positions = {ArrowRight: (current + 1) % buttons.length,
@@ -4070,15 +4079,20 @@ function handleSettingsTabKeydown(event) {
     if (!(event.key in positions)) return;
     event.preventDefault();
     const next = buttons[positions[event.key]];
-    switchSettingsTab(next.dataset.settingsTab);
+    switchSubTab(group, next.dataset[`${group}Tab`]);
     next.focus();
 }
 
-function initializeSettingsTabs() {
-    document.querySelectorAll('[data-settings-tab]').forEach(button => {
-        button.addEventListener('click', () => switchSettingsTab(button.dataset.settingsTab));
-        button.addEventListener('keydown', handleSettingsTabKeydown);
+function initializeSubTabs(group) {
+    document.querySelectorAll(`[data-${group}-tab]`).forEach(button => {
+        button.addEventListener('click', () => switchSubTab(group, button.dataset[`${group}Tab`]));
+        button.addEventListener('keydown', event => handleSubTabKeydown(group, event));
     });
+}
+
+function openSubTab(tabName, group, name) {
+    switchTab(tabName);
+    switchSubTab(group, name);
 }
 
 // ==================== Event Listeners ====================
@@ -4094,7 +4108,10 @@ document.addEventListener('DOMContentLoaded', () => {
             switchTab(button.dataset.tab);
         });
     });
-    initializeSettingsTabs();
+    initializeSubTabs('settings');
+    initializeSubTabs('history');
+    document.getElementById('points-open-settings').addEventListener('click', () => openSubTab('settings', 'settings', 'points'));
+    document.getElementById('points-open-history').addEventListener('click', () => openSubTab('history', 'history', 'points'));
 
     // Settings - auto-save on change
     document.getElementById('dark-mode').addEventListener('change', (e) => {

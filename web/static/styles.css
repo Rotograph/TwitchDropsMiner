@@ -3244,6 +3244,8 @@ header h1 {
 .points-history-table { max-width: 640px; }
 .points-history-table th:nth-child(n+2), .points-history-table td:nth-child(n+2) { text-align: right; }
 .points-history-table caption { text-align: left; color: var(--text-secondary); font-size: 12px; font-weight: 600; padding: 8px 10px 0; }
+.history-view-tabs { padding: 12px 16px 0; margin-bottom: 0; }
+#history-panel-points { padding: 12px 16px 0; }
 .points-container .points-log { height: 240px; flex: none; contain: none; margin: 0; }
 .points-container .settings-section select,
 .points-container .settings-section input[type="number"] { max-width: 100%; box-sizing: border-box; }
