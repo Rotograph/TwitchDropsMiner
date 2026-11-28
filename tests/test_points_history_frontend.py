@@ -140,3 +140,25 @@ const rows = el('points-history-gains').children.map(r => r.children.map(c => c.
 assert.deepEqual(rows.find(r => r[0] === 'Prediction'), ['Prediction', (-250).toLocaleString()]);
 assert.ok(rows.find(r => r[0] === 'Prediction')[1].includes('250') && /^[-−]/.test((-250).toLocaleString()));
 """)
+
+
+def test_the_chart_is_drawn_at_its_element_width_so_the_text_keeps_its_size():
+    run(r"""
+el('points-history-chart').clientWidth = 900;
+updatePointsHistory({channels: sample()});
+let svg = el('points-history-chart').children[0];
+assert.equal(svg.attrs.viewBox, `0 0 900 ${HISTORY_CHART.height}`);
+const times = () => el('points-history-chart').children[0].children.filter(c => c.tag === 'text').slice(2);
+assert.deepEqual(times().map(c => [c.attrs.x, c.attrs['text-anchor']]),
+    [[String(HISTORY_CHART.left), 'start'], [String(900 - HISTORY_CHART.right), 'end']]);
+// a narrow chart starts the first time under the value labels, clear of the last one
+el('points-history-chart').clientWidth = 300;
+updatePointsHistory({channels: sample()});
+assert.equal(el('points-history-chart').children[0].attrs.viewBox, `0 0 300 ${HISTORY_CHART.height}`);
+assert.equal(times()[0].attrs.x, '0');
+// a hidden chart has no width yet: the default size until it is shown
+el('points-history-chart').clientWidth = 0;
+updatePointsHistory({channels: sample()});
+assert.equal(el('points-history-chart').children[0].attrs.viewBox, `0 0 ${HISTORY_CHART.width} ${HISTORY_CHART.height}`);
+assert.equal(pointsHistoryWidth, 0, 'the next real width draws it again');
+""")
