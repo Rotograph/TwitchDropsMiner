@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from src.config import GQL_OPERATIONS
@@ -187,7 +187,7 @@ class Predictions:
             return None
         if start.tzinfo is None:
             return None
-        remaining = (start - datetime.now(timezone.utc)).total_seconds() + window - PREDICTION_DELAY_SECONDS
+        remaining = (start - datetime.now(UTC)).total_seconds() + window - PREDICTION_DELAY_SECONDS
         return max(remaining, 0.0)
 
     async def _fire(self, event_id: str, delay: float) -> None:

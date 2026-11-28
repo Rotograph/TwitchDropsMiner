@@ -7,7 +7,7 @@ import logging
 import pathlib
 import re
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1081,7 +1081,7 @@ def banning_service(monkeypatch, status):
 @pytest.mark.asyncio
 async def test_timed_ban_is_retried_once_it_expires(monkeypatch):
     svc, tw, now, ban = banning_service(monkeypatch, None)
-    ban[0] = {"isPermanent": False, "expiresAt": datetime.fromtimestamp(now[0] + 600, timezone.utc).isoformat()}
+    ban[0] = {"isPermanent": False, "expiresAt": datetime.fromtimestamp(now[0] + 600, UTC).isoformat()}
     try:
         await svc.track()
         now[0] += 590

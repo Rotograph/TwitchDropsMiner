@@ -10,13 +10,14 @@ import asyncio
 import logging
 from collections import abc
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import aiohttp
 from yarl import URL
 
 from src.config import COOKIES_PATH
+from src.config.settings import CONNECTION_QUALITY_RANGE
 from src.exceptions import ExitRequest, RequestException, RequestInvalid
 from src.i18n import _
 from src.utils import ExponentialBackoff
@@ -115,11 +116,12 @@ class HTTPClient:
             cookie_jar.clear()
 
         # Create timeouts based on connection quality
+        minimum, maximum = CONNECTION_QUALITY_RANGE
         connection_quality = self.settings.connection_quality
-        if connection_quality < 1:
-            connection_quality = self.settings.connection_quality = 1
-        elif connection_quality > 6:
-            connection_quality = self.settings.connection_quality = 6
+        if connection_quality < minimum:
+            connection_quality = self.settings.connection_quality = minimum
+        elif connection_quality > maximum:
+            connection_quality = self.settings.connection_quality = maximum
 
         timeout = aiohttp.ClientTimeout(
             sock_connect=5 * connection_quality,
@@ -194,7 +196,7 @@ class HTTPClient:
             elif (
                 invalidate_after is not None
                 # Account for expiration landing during the request
-                and datetime.now(timezone.utc) >= (invalidate_after - session_timeout)
+                and datetime.now(UTC) >= (invalidate_after - session_timeout)
             ):
                 raise RequestInvalid()
 
@@ -227,11 +229,7 @@ class HTTPClient:
                 if single_attempt:
                     raise RequestException("Unconfirmed HTTP response") from None
                 raise
-            except (
-                aiohttp.ClientConnectionError,
-                asyncio.TimeoutError,
-                aiohttp.ClientPayloadError,
-            ) as error:
+            except (TimeoutError, aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as error:
                 # Connection problems, retry with backoff
                 if self._diagnostics is not None:
                     self._diagnostics.record(self._diagnostics.endpoint(url, method),

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import quote
@@ -14,11 +14,13 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, StrictBool, StrictInt, ValidationInfo, field_validator
+from pydantic import BaseModel, Field, StrictBool, StrictInt, ValidationInfo, field_validator
 
 from src.config.paths import DATA_DIR
 from src.config.reward_priority import RewardPriority
 from src.config.settings import (
+    CONNECTION_QUALITY_RANGE,
+    REFRESH_INTERVAL_MINUTES_RANGE,
     IdleChannelSettings,
     InventoryFilterSettings,
     MiningHoursSettings,
@@ -109,8 +111,12 @@ class SettingsUpdate(BaseModel):
     claim_moments: StrictBool | None = None
     join_chat: StrictBool | None = None
     proxy: str | None = None
-    connection_quality: int | None = None
-    minimum_refresh_interval_minutes: int | None = None
+    connection_quality: StrictInt | None = Field(
+        default=None, ge=CONNECTION_QUALITY_RANGE[0], le=CONNECTION_QUALITY_RANGE[1]
+    )
+    minimum_refresh_interval_minutes: StrictInt | None = Field(
+        default=None, ge=REFRESH_INTERVAL_MINUTES_RANGE[0], le=REFRESH_INTERVAL_MINUTES_RANGE[1]
+    )
     discord_webhook_url: str | None = None
     discord_remove_webhook: StrictBool | None = None
     telegram_bot_token: str | None = None
@@ -334,7 +340,9 @@ async def verify_proxy(request: ProxyVerifyRequest):
         # Test connection to Twitch
         async with (
             aiohttp.ClientSession() as session,
-            session.get("https://www.twitch.tv", proxy=proxy_url, timeout=10) as response,
+            session.get(
+                "https://www.twitch.tv", proxy=proxy_url, timeout=aiohttp.ClientTimeout(total=10)
+            ) as response,
         ):
             if twitch_client is not None:
                 twitch_client.diagnostics.record_http("GET", "https://www.twitch.tv", response.status)
@@ -519,7 +527,8 @@ async def clear_history():
     if not twitch_client:
         raise HTTPException(status_code=503, detail="Twitch client not initialized")
 
-    twitch_client.drop_history.clear()
+    if not twitch_client.drop_history.clear():
+        raise HTTPException(status_code=500, detail="history_not_saved")
     return {"success": True}
 
 
@@ -531,8 +540,8 @@ def _parse_history_since(since: str | None) -> datetime | None:
         # Accept both a bare date (YYYY-MM-DD) and a full ISO timestamp
         parsed = datetime.fromisoformat(since)
         if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
+            return parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
     except (ValueError, TypeError):
         return None
 

@@ -16,6 +16,9 @@ from src.utils import DropIgnorePolicy, json_load, json_save, merge_json
 
 logger = logging.getLogger("TwitchDrops")
 
+CONNECTION_QUALITY_RANGE = (1, 6)
+REFRESH_INTERVAL_MINUTES_RANGE = (1, 1440)
+
 
 class InventoryFilters(TypedDict):
     game_name_search: list[str]
@@ -302,6 +305,20 @@ class Settings:
         last_notified = settings.pop("last_notified_release", None)
         if isinstance(last_notified, str) and "last_notified_releases" not in settings:
             settings["last_notified_releases"] = {"telegram": last_notified, "discord": last_notified}
+        for key, (minimum, maximum) in (
+            ("connection_quality", CONNECTION_QUALITY_RANGE),
+            ("minimum_refresh_interval_minutes", REFRESH_INTERVAL_MINUTES_RANGE),
+        ):
+            if key not in settings:
+                continue
+            value = settings[key]
+            if type(value) is not int:
+                logger.warning("Invalid type for %s in settings.json. Using the default.", key)
+                settings[key] = default_settings[key]
+            elif not minimum <= value <= maximum:
+                clamped = min(max(value, minimum), maximum)
+                logger.warning("Out-of-range %s in settings.json. Using %d.", key, clamped)
+                settings[key] = clamped
         merge_json(settings, default_settings)
         settings.pop("allow_helper_connection", None)
         for key, value in settings.items():
