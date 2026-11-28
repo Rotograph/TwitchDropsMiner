@@ -475,7 +475,7 @@
             "col_last_gain": "Laatste winst",
             "live": "Live",
             "offline": "Offline",
-            "no_channels": "Er staan geen kanalen in de lijst. Voeg hieronder kanalen toe onder Kanalen voor passief kijken.",
+            "no_channels": "Er staan geen kanalen in de lijst. Voeg kanalen toe onder Instellingen > Punten.",
             "log_header": "Logboek kanaalpunten",
             "save_error": "Deze optie voor kanaalpunten kon niet worden opgeslagen. Probeer het opnieuw.",
             "order_header": "Kijkvolgorde",

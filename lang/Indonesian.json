@@ -475,7 +475,7 @@
             "col_last_gain": "Perolehan terakhir",
             "live": "Live",
             "offline": "Offline",
-            "no_channels": "Tidak ada saluran dalam daftar. Tambahkan saluran di bawah Saluran tontonan pasif.",
+            "no_channels": "Tidak ada saluran dalam daftar. Tambahkan saluran di Parameter > Poin.",
             "log_header": "Log poin saluran",
             "save_error": "Opsi poin saluran ini tidak dapat disimpan. Silakan coba lagi.",
             "order_header": "Urutan menonton",

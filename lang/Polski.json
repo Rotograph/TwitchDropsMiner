@@ -475,7 +475,7 @@
             "col_last_gain": "Ostatni zysk",
             "live": "Na żywo",
             "offline": "Offline",
-            "no_channels": "Na liście nie ma kanałów. Dodaj kanały poniżej, w sekcji Kanały do pasywnego oglądania.",
+            "no_channels": "Na liście nie ma kanałów. Dodaj kanały w sekcji Ustawienia > Punkty.",
             "log_header": "Dziennik punktów kanału",
             "save_error": "Nie udało się zapisać tej opcji punktów kanału. Spróbuj ponownie.",
             "order_header": "Kolejność oglądania",

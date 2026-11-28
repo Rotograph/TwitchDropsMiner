@@ -475,7 +475,7 @@
             "col_last_gain": "Letzter Gewinn",
             "live": "Live",
             "offline": "Offline",
-            "no_channels": "Es sind keine Kanäle gelistet. Füge unten unter Kanäle für passives Zuschauen Kanäle hinzu.",
+            "no_channels": "Es sind keine Kanäle gelistet. Füge Kanäle unter Einstellungen > Punkte hinzu.",
             "log_header": "Kanalpunkte-Protokoll",
             "save_error": "Diese Kanalpunkte-Option konnte nicht gespeichert werden. Bitte versuche es erneut.",
             "order_header": "Reihenfolge beim Zuschauen",

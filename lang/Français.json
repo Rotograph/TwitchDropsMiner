@@ -475,7 +475,7 @@
             "col_last_gain": "Dernier gain",
             "live": "En direct",
             "offline": "Hors ligne",
-            "no_channels": "Aucune chaîne n'est listée. Ajoutez des chaînes ci-dessous, sous Chaînes à visionnage passif.",
+            "no_channels": "Aucune chaîne n'est listée. Ajoutez des chaînes dans Paramètres > Points.",
             "log_header": "Journal des points de chaîne",
             "save_error": "Impossible d'enregistrer cette option de points de chaîne. Veuillez réessayer.",
             "order_header": "Ordre de visionnage",

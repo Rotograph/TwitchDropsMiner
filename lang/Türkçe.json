@@ -475,7 +475,7 @@
             "col_last_gain": "Son kazanç",
             "live": "Canlı",
             "offline": "Çevrimdışı",
-            "no_channels": "Listede kanal yok. Aşağıda Pasif izlenen kanallar bölümünden kanal ekle.",
+            "no_channels": "Listede kanal yok. Ayarlar > Puanlar bölümünden kanal ekle.",
             "log_header": "Kanal puanı günlüğü",
             "save_error": "Bu kanal puanı seçeneği kaydedilemedi. Lütfen tekrar dene.",
             "order_header": "İzleme sırası",

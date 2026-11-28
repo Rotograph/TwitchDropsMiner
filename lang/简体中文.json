@@ -475,7 +475,7 @@
             "col_last_gain": "最近获得",
             "live": "直播中",
             "offline": "离线",
-            "no_channels": "列表中没有频道。请在下方的挂机观看频道中添加频道。",
+            "no_channels": "列表中没有频道。请在设置 > 积分中添加频道。",
             "log_header": "频道积分日志",
             "save_error": "无法保存此频道积分选项。请重试。",
             "order_header": "观看顺序",

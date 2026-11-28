@@ -601,3 +601,11 @@ for (const row of tableRows()) {
     assert.ok(row.children.every(cell => cell.tag === 'td' && cell.attrs.role === 'cell'));
 }
 """)
+
+
+def test_every_locale_points_to_the_settings_points_tab_for_an_empty_list():
+    for path in sorted((ROOT / "lang").glob("*.json")):
+        gui = json.loads(path.read_text(encoding="utf-8"))["gui"]
+        text = gui["points"]["no_channels"]
+        # the list is under Settings > Points, not on the Points tab: name both tabs as the UI shows them
+        assert f'{gui["tabs"]["settings"]} > {gui["tabs"]["points"]}' in text, (path.name, text)

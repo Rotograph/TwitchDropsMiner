@@ -475,7 +475,7 @@
             "col_last_gain": "Utolsó nyeremény",
             "live": "Élő",
             "offline": "Offline",
-            "no_channels": "Nincs csatorna a listán. Adj hozzá csatornákat lent, a Passzívan nézett csatornák alatt.",
+            "no_channels": "Nincs csatorna a listán. Csatornákat itt adhatsz hozzá: Beállítások > Pontok.",
             "log_header": "Csatornapont-napló",
             "save_error": "Ezt a csatornapont-beállítást nem sikerült menteni. Próbáld újra.",
             "order_header": "Nézési sorrend",
