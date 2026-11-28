@@ -26,7 +26,7 @@ def manager(idle=("a", "b", "c")):
         channels={1: chan(1, "a"), 2: chan(2, "b", online=False)},
         settings=SimpleNamespace(idle_channels=list(idle)),
         idle_watch=SimpleNamespace(balances={1: 900}, points_paused=False, active=True, history=PointsHistory(),
-                                   side_channel=None),
+                                   side_channel=None, idle_watched=lambda _channel_id: None),
     )
     log = ConsoleOutputManager(broadcaster, event="points_output", echo=False)
     return PointsManager(broadcaster, twitch, log), broadcaster, twitch
@@ -40,10 +40,13 @@ def emitted(broadcaster, event):
 async def test_state_payload_lists_every_listed_channel_in_list_order():
     points, _, _ = manager()
     assert points.get_state() == {"paused": False, "active": True, "channels": [
-        {"login": "a", "name": "A", "live": True, "balance": 900, "last_gain": None, "side": False},
-        {"login": "b", "name": "B", "live": False, "balance": None, "last_gain": None, "side": False},
+        {"login": "a", "name": "A", "live": True, "balance": 900, "last_gain": None, "side": False,
+         "watching": False},
+        {"login": "b", "name": "B", "live": False, "balance": None, "last_gain": None, "side": False,
+         "watching": False},
         # listed but not tracked (yet): its login as name, offline, unknown balance
-        {"login": "c", "name": "c", "live": False, "balance": None, "last_gain": None, "side": False},
+        {"login": "c", "name": "c", "live": False, "balance": None, "last_gain": None, "side": False,
+         "watching": False},
     ]}
 
 
@@ -75,6 +78,38 @@ async def test_balance_stays_shown_after_a_cleanup_untracks_the_channel():
     points.clear()  # account change
     twitch.idle_watch.balances.clear()
     assert points.get_state()["channels"][0]["balance"] is None
+
+
+@pytest.mark.asyncio
+async def test_watching_marks_only_the_channel_the_idle_loop_still_watches():
+    from types import MethodType
+
+    from src.services.idle_watch import IdleWatchService
+
+    points, _, twitch = manager()
+    a = twitch.channels[1]
+    watched = SimpleNamespace(get_with_default=lambda _default: a)
+    twitch.watching_channel = watched
+    twitch.can_watch = lambda _channel: False
+    idle = twitch.idle_watch
+    # the service's own rule: the loop runs, its pick is still the watched channel and drops cannot use it
+    idle.side, idle.side_channel, idle.watched = False, None, a
+    idle._twitch = twitch
+    idle._watching = MethodType(IdleWatchService._watching, idle)
+    idle.idle_watched = MethodType(IdleWatchService.idle_watched, idle)
+    rows = lambda: [row["watching"] for row in points.get_state()["channels"]]  # noqa: E731
+    assert rows() == [True, False, False]
+    twitch.can_watch = lambda _channel: True  # a drop channel is mined, not idle watched
+    assert rows() == [False, False, False]
+    twitch.can_watch = lambda _channel: False
+    idle.active = False
+    assert rows() == [False, False, False]
+    idle.active = True
+    twitch.watching_channel = SimpleNamespace(get_with_default=lambda _default: None)  # the watch moved away
+    assert rows() == [False, False, False]
+    # second slot: the side watcher's channel is the watched one
+    idle.side, idle.side_channel = True, a
+    assert rows() == [True, False, False]
 
 
 @pytest.mark.asyncio

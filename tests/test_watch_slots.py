@@ -446,7 +446,7 @@ async def test_points_tab_shows_the_side_slot_row():
     twitch = SimpleNamespace(
         channels={1: a, 2: b}, settings=SimpleNamespace(idle_channels=["a", "b"]),
         idle_watch=SimpleNamespace(balances={}, points_paused=False, active=True, history=PointsHistory(),
-                                   side_channel=b),
+                                   side_channel=b, idle_watched=lambda _channel_id: None),
     )
     points = PointsManager(AsyncMock(), twitch, MagicMock())
     assert [row["side"] for row in points.get_state()["channels"]] == [False, True]
