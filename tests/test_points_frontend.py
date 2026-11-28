@@ -80,14 +80,27 @@ def test_tab_sits_between_history_and_settings_with_its_icon_and_panel():
     assert icon in CSS
 
 
-def test_idle_settings_moved_from_the_settings_tab_to_the_points_tab():
+def test_idle_settings_sit_in_the_points_settings_panel_not_the_points_tab():
     points = block('<div id="points-tab"', '<!-- Settings Tab -->')
     settings = block('<!-- Settings Tab -->', '<!-- Help Tab -->')
-    for fragment in ('id="claim-channel-points"', 'id="share-watch-streaks"', 'id="idle-channels-list"',
-                     'id="idle-channel-input"', 'id="idle-channel-add"', 'id="idle-channels-error"'):
-        assert fragment in points, fragment
-        assert fragment not in settings, fragment
-    assert points.count('id="idle-channels-list"') == 1
+    panel = block('<div id="settings-panel-points"', '<div id="settings-panel-notifications"')
+    for fragment in ('id="idle-channels-section"', 'id="claim-channel-points"', 'id="share-watch-streaks"',
+                     'id="idle-channels-list"', 'id="idle-channel-input"', 'id="idle-channel-add"',
+                     'id="idle-channels-error"', 'id="points-setting-predictions_enabled"',
+                     'id="points-setting-watch_slots"', 'id="points-setting-join_chat"'):
+        assert fragment in panel, fragment
+        assert fragment not in points, fragment
+    assert settings.count('id="idle-channels-list"') == 1
+    # the Points tab keeps the status, the listed channels and the log only
+    assert 'id="points-status"' in points and 'id="points-table"' in points and 'id="points-log"' in points
+    assert points.count('<section') == 3
+    assert 'points-history-section' not in points
+
+
+def test_points_tab_has_shortcut_buttons_with_default_labels():
+    points = block('<div id="points-tab"', '<!-- Settings Tab -->')
+    assert re.search(r'id="points-open-settings"[^>]*>Settings &gt; Points<', points)
+    assert re.search(r'id="points-open-history"[^>]*>History &gt; Channel points<', points)
 
 
 def test_every_points_option_has_a_control_matching_the_server_keys():

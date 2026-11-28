@@ -23,14 +23,15 @@ def test_every_settings_section_sits_in_exactly_one_panel_with_a_tab():
     markup = _settings_markup()
     tabs = re.findall(r'data-settings-tab="([a-z]+)"', markup)
     panels = re.findall(r'id="settings-panel-([a-z]+)"', markup)
-    assert tabs == panels == ["general", "mining", "games", "notifications", "account"]
-    chunks = markup.split('class="settings-panel"')
+    assert tabs == panels == ["general", "mining", "games", "points", "notifications", "account"]
+    chunks = re.split(r'class="settings-panel[" ]', markup)
     assert "settings-section" not in chunks[0], "section outside any panel"
     assert all("settings-section" in chunk for chunk in chunks[1:])
     # Mining benefits used to live inside the Telegram section.
     telegram = re.search(r'<section[^>]*>(?:(?!</section>).)*telegram-bot-token.*?</section>', markup, re.S)
     assert telegram and "mining-benefit-item" not in telegram.group(0)
     groups = dict(zip(panels, chunks[1:], strict=True))
+    assert 'id="idle-channels-section"' in groups['points']
     assert 'id="reward-priority-section"' in groups['mining']
     assert 'id="priority-list-only"' in groups['games']
     assert 'id="select-linked-btn"' in groups['games']
@@ -42,7 +43,7 @@ def test_every_settings_section_sits_in_exactly_one_panel_with_a_tab():
 @pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend tests")
 def test_switch_settings_tab_shows_only_the_selected_panel():
     source = APP_JS.read_text(encoding="utf-8")
-    script = extract_javascript_function(source, "switchSettingsTab") + r"""
+    script = extract_javascript_function(source, "switchSubTab") + r"""
 const assert = require('node:assert/strict');
 const names = ['general', 'mining', 'games'];
 const buttons = names.map(name => ({
@@ -55,7 +56,7 @@ const panels = names.map(name => ({ id: `settings-panel-${name}`, hidden: name !
 const document = {
     querySelectorAll: sel => sel === '[data-settings-tab]' ? buttons : panels
 };
-switchSettingsTab('mining');
+switchSubTab('settings', 'mining');
 assert.deepEqual(panels.map(p => p.hidden), [true, false, true]);
 assert.deepEqual(buttons.map(b => b.attrs['aria-selected']), ['false', 'true', 'false']);
 assert.deepEqual(buttons.map(b => b.classes.has('active')), [false, true, false]);
@@ -67,7 +68,7 @@ assert.deepEqual(buttons.map(b => b.classes.has('active')), [false, true, false]
 @pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend tests")
 @pytest.mark.parametrize('action', ['hours', 'telegram_save', 'telegram_test', 'discord', 'proxy', 'unlinked', 'reward', 'notification_events'])
 def test_failed_save_after_leaving_its_panel_remains_visible(action):
-    names = ['switchSettingsTab', 'toggleMiningHoursRange', 'onMiningHoursChange',
+    names = ['switchSubTab', 'toggleMiningHoursRange', 'onMiningHoursChange',
              'handleSaveTelegramClick', 'testTelegramConnection', 'saveTelegramSettings',
              'saveDiscordSettings', 'updateDiscordSettings', 'saveProxy', 'onUnlinkedMiningChange',
              'saveBooleanSetting', 'saveRewardPriority', 'onNotificationEventChange']
@@ -75,7 +76,7 @@ def test_failed_save_after_leaving_its_panel_remains_visible(action):
     if 'function reportSettingsError(' in source:
         names.append('reportSettingsError')
     script = UI_SETUP + r"""
-const panelNames = ['general','mining','games','notifications','account'];
+const panelNames = ['general','mining','games','points','notifications','account'];
 const panels = panelNames.map(name=>({id:'settings-panel-'+name,hidden:name!=='general'}));
 const buttons = panelNames.map(name=>({dataset:{settingsTab:name},classList:{toggle(){}},setAttribute(){}}));
 document.querySelectorAll=selector=>selector==='[data-settings-tab]'?buttons:panels;
@@ -115,10 +116,10 @@ const actions={
 };
 """ + f"const action=actions[{action!r}];\n" + r"""
 (async()=>{
- switchSettingsTab(action.panel);
+ switchSubTab('settings',action.panel);
  const pending=action.run();
  assert.equal(typeof release,'function','the actual handler reached its asynchronous request');
- switchSettingsTab(action.panel==='general'?'games':'general');
+ switchSubTab('settings',action.panel==='general'?'games':'general');
  release();await pending;
  const result=document.getElementById(action.result);
  assert.ok(panel(action.panel).hidden);
@@ -130,30 +131,37 @@ const actions={
 
 
 @pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend tests")
-def test_tab_click_and_arrow_home_end_keys_keep_one_tab_stop_and_panel():
-    run_javascript(['switchSettingsTab', 'handleSettingsTabKeydown', 'initializeSettingsTabs'], r"""
+@pytest.mark.parametrize('group,names', [
+    ('settings', ['general', 'mining', 'games', 'points', 'notifications', 'account']),
+    ('history', ['drops', 'points'])])
+def test_tab_click_and_arrow_home_end_keys_keep_one_tab_stop_and_panel(group, names):
+    run_javascript(['switchSubTab', 'handleSubTabKeydown', 'initializeSubTabs'],
+                   f"const group={group!r};const names={json.dumps(names)};" + r"""
 const assert=require('node:assert/strict');
-const names=['general','mining','games','notifications','account'];
-const buttons=names.map(name=>({dataset:{settingsTab:name},attrs:{},events:{},classList:{toggle(){}},
+const buttons=names.map(name=>({dataset:{[group+'Tab']:name},attrs:{},events:{},classList:{toggle(){}},
  setAttribute(k,v){this.attrs[k]=v},addEventListener(k,fn){this.events[k]=fn},focus(){document.activeElement=this}}));
-const panels=names.map(name=>({id:'settings-panel-'+name,hidden:name!=='general'}));
-const document={activeElement:null,querySelectorAll:s=>s==='[data-settings-tab]'?buttons:panels};
-initializeSettingsTabs();
-const check=name=>{
- assert.deepEqual(panels.filter(p=>!p.hidden).map(p=>p.id),['settings-panel-'+name]);
- assert.deepEqual(buttons.filter(b=>b.attrs.tabindex==='0').map(b=>b.dataset.settingsTab),[name]);
- assert.deepEqual(buttons.filter(b=>b.attrs['aria-selected']==='true').map(b=>b.dataset.settingsTab),[name]);
+const panels=names.map(name=>({id:group+'-panel-'+name,hidden:name!==names[0]}));
+// a panel of the other group must never be touched
+const foreign=[{id:'settings-panel-x',hidden:false},{id:'history-panel-x',hidden:false}].filter(p=>!p.id.startsWith(group));
+const document={activeElement:null,
+ querySelectorAll:s=>s===`[data-${group}-tab]`?buttons:s.startsWith('[data-')?[]:[...panels,...foreign]};
+initializeSubTabs(group);
+const last=names.length-1;
+const check=index=>{
+ assert.deepEqual(panels.filter(p=>!p.hidden).map(p=>p.id),[group+'-panel-'+names[index]]);
+ assert.deepEqual(buttons.filter(b=>b.attrs.tabindex==='0').map(b=>b.dataset[group+'Tab']),[names[index]]);
+ assert.deepEqual(buttons.filter(b=>b.attrs['aria-selected']==='true').map(b=>b.dataset[group+'Tab']),[names[index]]);
+ assert.ok(foreign.every(p=>!p.hidden));
 };
-buttons[2].events.click();check('games');
+buttons[last].events.click();check(last);
 const key=(index,key)=>{let prevented=false;buttons[index].events.keydown({currentTarget:buttons[index],key,
  preventDefault(){prevented=true}});return prevented};
-assert.ok(key(2,'ArrowRight'));check('notifications');assert.equal(document.activeElement,buttons[3]);
-assert.ok(key(3,'End'));check('account');
-assert.ok(key(4,'ArrowRight'));check('general');
-assert.ok(key(0,'ArrowLeft'));check('account');
-assert.ok(key(4,'Home'));check('general');
-assert.equal(key(0,'Tab'),false);check('general');
-switchSettingsTab('unknown');check('general');
+assert.ok(key(last,'ArrowRight'));check(0);assert.equal(document.activeElement,buttons[0]);
+assert.ok(key(0,'ArrowLeft'));check(last);
+assert.ok(key(last,'Home'));check(0);
+assert.ok(key(0,'End'));check(last);
+assert.equal(key(last,'Tab'),false);check(last);
+switchSubTab(group,'unknown');check(last);
 """)
 
 
@@ -162,11 +170,11 @@ switchSettingsTab('unknown');check('general');
 def test_tab_labels_use_translations_as_text(locale):
     translations = json.loads((INDEX_HTML.parents[1] / 'lang' / f'{locale}.json').read_text(encoding='utf-8'))
     settings = translations['gui']['settings']
-    expected = [settings['general']['name'], *(settings[key] for key in
-                ['tab_mining', 'tab_games', 'tab_notifications', 'tab_account'])]
+    expected = [settings['general']['name'], settings['tab_mining'], settings['tab_games'],
+                translations['gui']['tabs']['points'], settings['tab_notifications'], settings['tab_account']]
     run_javascript(['applyTranslations'], r"""
 const assert=require('node:assert/strict');
-const names=['general','mining','games','notifications','account'];
+const names=['general','mining','games','points','notifications','account'];
 const buttons=Object.fromEntries(names.map(name=>['settings-tab-'+name,{textContent:''}]));
 for(const button of Object.values(buttons))Object.defineProperty(button,'innerHTML',{set(){throw Error('unsafe')}});
 const document={getElementById:id=>id==='settings-tab'?{querySelector:()=>null}:buttons[id]||null,
@@ -189,4 +197,48 @@ reportSettingsError(element,'Translated failure');
 assert.equal(element.textContent,'Translated failure');assert.deepEqual(calls,[]);
 panel.hidden=true;reportSettingsError(element,'Translated failure');
 assert.deepEqual(calls,[['Translated failure','error']]);
+""")
+
+
+def test_history_views_are_a_tab_group_with_the_drop_and_points_content():
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    markup = html[html.index('<div id="history-tab"') : html.index("<!-- Footer -->")]
+    assert re.findall(r'data-history-tab="([a-z]+)"', markup) == ["drops", "points"]
+    assert re.findall(r'id="history-panel-([a-z]+)"', markup) == ["drops", "points"]
+    drops, points = markup.split('id="history-panel-points"')
+    assert 'id="history-table"' in drops and 'id="history-filter-game"' in drops
+    assert 'id="points-history-section"' in points and 'id="points-history-chart"' in points
+    assert 'points-history' not in drops
+    assert 'hidden>' in points.split("\n")[0]
+    assert 'aria-selected="true" tabindex="0"' in drops.split('id="history-panel-drops"')[0]
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend tests")
+def test_shortcut_buttons_open_the_settings_and_history_views_and_labels_join_existing_strings():
+    run_javascript(['openSubTab', 'switchSubTab', 'switchTab', 'applyTranslations'], r"""
+const assert=require('node:assert/strict');
+const calls=[];
+function loadHistory(){calls.push('loadHistory')}
+function translateHistory(){}
+function renderGamesToWatch(){}
+function translatePoints(){}
+const mk=(group,name)=>({dataset:{[group+'Tab']:name},attrs:{},classList:{toggle(){}},setAttribute(k,v){this.attrs[k]=v}});
+const buttons={settings:[mk('settings','general'),mk('settings','points')],history:[mk('history','drops'),mk('history','points')]};
+const panels=[{id:'settings-panel-general',hidden:false},{id:'settings-panel-points',hidden:true},
+ {id:'history-panel-drops',hidden:false},{id:'history-panel-points',hidden:true}];
+const tabs=['history','settings'].map(n=>({dataset:{tab:n},classList:{add(){},remove(){}},textContent:''}));
+const content=['history','settings'].map(n=>({id:n+'-tab',classList:{add(){calls.push('show '+n)},remove(){}},querySelector:()=>null}));
+const shortcuts={'points-open-settings':{textContent:''},'points-open-history':{textContent:''}};
+const document={
+ querySelectorAll:s=>{const m=/^\[data-(\w+)-tab\]$/.exec(s);return m?buttons[m[1]]:s==='.settings-panel'?panels:[]},
+ querySelector:s=>s==='[data-tab="history"]'?tabs[0]:s==='[data-tab="settings"]'?tabs[1]:null,
+ getElementById:id=>content.find(c=>c.id===id)||shortcuts[id]||(id==='settings-tab'?{querySelector:()=>null}:null)};
+openSubTab('history','history','points');
+assert.deepEqual(panels.map(p=>p.hidden),[false,true,true,false]);
+assert.ok(calls.includes('loadHistory'));
+openSubTab('settings','settings','points');
+assert.deepEqual(panels.map(p=>p.hidden),[true,false,true,false]);
+applyTranslations({gui:{tabs:{settings:'S',points:'P',history:'H',main:'',inventory:'',help:''},points:{title:'T'},settings:{general:{name:'G'}}}});
+assert.equal(shortcuts['points-open-settings'].textContent,'S > P');
+assert.equal(shortcuts['points-open-history'].textContent,'H > T');
 """)

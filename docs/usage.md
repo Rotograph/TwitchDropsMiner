@@ -16,12 +16,12 @@ simultaneous viewing can disrupt progress.
 | --- | --- |
 | Main | Login status, the current campaign and drop, wanted rewards, console output, and channels |
 | Inventory | Campaigns and rewards, with status, benefit, and game filters |
-| History | Locally recorded claims, statistics, and CSV export |
-| Points | Channel points of idle watching: pause button, listed channels with balance and last gain, the balance history and bets per channel, the channel points log, and the idle watching settings |
-| Settings | Grouped into sub-tabs: **General** (theme, connection, proxy), **Mining** (reward types, mining hours, account-link override, ignored names), **Games** (priorities and reload), **Notifications** (Discord, Telegram), and **Account & Maintenance** (dashboard password, cache, diagnostics, Twitch logout) |
+| History | Two views: **Drop History** (locally recorded claims, statistics, and CSV export) and **Channel points** (the balance history and bets per channel) |
+| Points | Channel points of idle watching: pause button, listed channels with balance and last gain, and the channel points log, with shortcuts to the points settings and the points history |
+| Settings | Grouped into sub-tabs: **General** (theme, connection, proxy), **Mining** (reward types, mining hours, account-link override, ignored names), **Games** (priorities and reload), **Points** (idle watching channels and the channel points settings), **Notifications** (Discord, Telegram), and **Account & Maintenance** (dashboard password, cache, diagnostics, Twitch logout) |
 | Help | A quick explanation of mining and Telegram setup |
 
-Use Left/Right arrows, Home or End to switch Settings sub-tabs from the tab bar.
+Use Left/Right arrows, Home or End to switch Settings sub-tabs, or the History views, from the tab bar.
 If your saved language is unavailable after an update, TDM starts in English.
 
 ## Connection and refresh settings
@@ -277,12 +277,12 @@ versioned frontend controls.
 
 ## Idle watching
 
-**Points -> Idle watching channels** lists Twitch channels (lowercase
+**Settings → Points → Idle watching channels** lists Twitch channels (lowercase
 logins, at most 20) that TDM watches when nothing can be mined. With one slot (the
 default), idle watching runs only when no drop can be mined and only inside mining hours.
 A listed channel that a drop can use goes to drop mining instead.
 
-**Channels watched at a time** (`watch_slots`, 1 or 2, on the **Points** tab): with 2,
+**Channels watched at a time** (`watch_slots`, 1 or 2, under **Settings → Points**): with 2,
 idle watching also runs while a drop is mined. TDM then watches one listed channel next
 to the drop channel, on a second watch of its own. It uses only listed channels that
 drops cannot use and whose current stream lists no drops campaign at all, earnable or
@@ -384,9 +384,9 @@ Twitch credits points and drops for two watches at a time is unknown.
   balance and the last gain (amount, reason and time); a dash means TDM has not seen a
   balance or a gain yet. Below it, the channel points log keeps its own lines (gains,
   claims, visits, shares, pause), separate from the main console and kept for the
-  current run. The settings of this section sit under the log and save when changed; a
+  current run. The settings of this section are under **Settings → Points** (the Points tab has a shortcut button) and save when changed; a
   failed save shows an error and restores the previous value.
-- The **History** section of the **Points** tab shows, for one listed channel at a time
+- The **Channel points** view of the **History** tab (a shortcut button on the **Points** tab opens it) shows, for one listed channel at a time
   (pick it in the select), a line chart of its balance over time, a table of the points
   gained by source (watching, bonus claim, watch streak, raid, prediction win, other) and
   the bets TDM placed there: won, lost, refunded and the points won (Twitch's payout,
