@@ -2881,11 +2881,12 @@ function renderPoints() {
     document.getElementById('points-table').hidden = empty;
     const nowWatching = state.translations.gui?.channels?.now_watching || 'Now Watching';
     tbody.replaceChildren(...channels.map(channel => {
-        const row = makeElement('tr');
+        // explicit roles: the stacked layout on narrow screens would drop the table semantics
+        const row = makeElement('tr', {role: 'row'});
         row.dataset.login = String(channel.login);
         const live = channel.live === true;
         const gain = formatPointsGain(channel.last_gain, t.reasons || {});
-        const gainCell = makeElement('td', {class: 'points-gain'});
+        const gainCell = makeElement('td', {class: 'points-gain', role: 'cell'});
         if (gain) {
             gainCell.appendChild(makeElement('span', {class: gain.up ? 'points-gain-amount points-gain-up' : 'points-gain-amount'}, gain.amount));
             gainCell.appendChild(makeElement('span', {class: 'points-gain-reason'}, gain.label));
@@ -2893,7 +2894,7 @@ function renderPoints() {
         } else {
             gainCell.textContent = '-';
         }
-        const name = makeElement('td', {class: 'points-channel'}, channel.name || channel.login);
+        const name = makeElement('td', {class: 'points-channel', role: 'cell'}, channel.name || channel.login);
         // the channel the second watch slot watches next to drop mining; it is also the watched row
         if (channel.side === true) {
             name.appendChild(makeElement('span', {class: 'points-side'}, t.side_watching || 'Watching (second slot)'));
@@ -2903,9 +2904,9 @@ function renderPoints() {
         if (channel.watching === true) row.setAttribute('aria-current', 'true');
         row.replaceChildren(
             name,
-            makeElement('td', {class: live ? 'points-live' : 'points-offline'},
+            makeElement('td', {class: live ? 'points-live' : 'points-offline', role: 'cell'},
                 live ? (t.live || 'Live') : (t.offline || 'Offline')),
-            makeElement('td', {class: 'points-balance'},
+            makeElement('td', {class: 'points-balance', role: 'cell'},
                 Number.isInteger(channel.balance) ? channel.balance.toLocaleString() : '-'),
             gainCell);
         return row;

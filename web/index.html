@@ -294,16 +294,16 @@
                     <section class="settings-section points-channels">
                         <h2 data-points-text="channels_header">Listed channels</h2>
                         <div class="points-table-wrap">
-                            <table id="points-table" class="points-table points-channel-table">
-                                <thead>
-                                    <tr>
-                                        <th scope="col" data-points-text="col_channel">Channel</th>
-                                        <th scope="col" data-points-text="col_live">Status</th>
-                                        <th scope="col" data-points-text="col_balance">Balance</th>
-                                        <th scope="col" data-points-text="col_last_gain">Last gain</th>
+                            <table id="points-table" class="points-table points-channel-table" role="table">
+                                <thead role="rowgroup">
+                                    <tr role="row">
+                                        <th scope="col" role="columnheader" data-points-text="col_channel">Channel</th>
+                                        <th scope="col" role="columnheader" data-points-text="col_live">Status</th>
+                                        <th scope="col" role="columnheader" data-points-text="col_balance">Balance</th>
+                                        <th scope="col" role="columnheader" data-points-text="col_last_gain">Last gain</th>
                                     </tr>
                                 </thead>
-                                <tbody id="points-tbody"></tbody>
+                                <tbody id="points-tbody" role="rowgroup"></tbody>
                             </table>
                         </div>
                         <p id="points-empty" class="help-text" data-points-text="no_channels">No channels are listed. Add channels under Settings &gt; Points.</p>

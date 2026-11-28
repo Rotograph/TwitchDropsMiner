@@ -577,3 +577,27 @@ def test_conditional_prediction_fields_name_real_choices():
         start = HTML.index(f'id="points-setting-{key}"')
         options = re.findall(r'<option value="(\w+)"', HTML[start:HTML.index("</select>", start)])
         assert set(values.split(",")) <= set(options), (key, values)
+
+
+def test_channel_table_markup_has_explicit_table_roles():
+    table = HTML[HTML.index('<table id="points-table"'):HTML.index('</table>', HTML.index('<table id="points-table"'))]
+    assert 'role="table"' in table.split(">", 1)[0]
+    assert re.search(r'<thead role="rowgroup">\s*<tr role="row">', table)
+    assert table.count('role="columnheader"') == table.count("<th ") == 4
+    assert '<tbody id="points-tbody" role="rowgroup">' in table
+    # the stacked layout is the one that changes display; it must stay on this table only
+    assert ".points-channel-table tr { display: grid;" in CSS
+
+
+@needs_node
+def test_rendered_channel_rows_and_cells_keep_their_roles():
+    run_points(r"""
+updatePointsState({paused: false, active: true, channels: [
+    {login: 'one', name: 'One', live: true, balance: 1, last_gain: {points: 5, reason: 'WATCH', at: 'bad'}, watching: true},
+    {login: 'two', name: 'Two', live: false, balance: null, last_gain: null}]});
+for (const row of tableRows()) {
+    assert.equal(row.attrs.role, 'row');
+    assert.equal(row.children.length, 4);
+    assert.ok(row.children.every(cell => cell.tag === 'td' && cell.attrs.role === 'cell'));
+}
+""")
